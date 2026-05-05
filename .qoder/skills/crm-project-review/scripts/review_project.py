@@ -229,8 +229,47 @@ def main() -> int:
     args = p.parse_args()
 
     if not args.mcp_url:
-        print("ERROR: --mcp-url 或 HAP_MCP_URL 必须提供", file=sys.stderr)
-        return 2
+        # 兜底：调 hap-app-access skill 提供的通用 mcp_token.py（缓存 + 过期自动刷新）
+        # 凭证从 env 读，全程不进对话；subprocess 调用 → 零 import 耦合
+        import subprocess
+        from pathlib import Path as _P
+
+        hap_dir = os.environ.get("HAP_APP_ACCESS_DIR", "").strip()
+        candidates: list[_P] = []
+        if hap_dir:
+            candidates.append(_P(hap_dir))
+        candidates.extend([
+            _P.home() / "Desktop" / "hap-app-access",
+            _P.home() / "hap-app-access",
+            _P.home() / ".qoder" / "skills" / "hap-app-access",
+        ])
+        mcp_token_bin = None
+        for d in candidates:
+            cand = d / "scripts" / "mcp_token.py"
+            if cand.exists():
+                mcp_token_bin = cand
+                break
+        if not mcp_token_bin:
+            print("ERROR: --mcp-url / HAP_MCP_URL 未提供，且未找到 hap-app-access/scripts/mcp_token.py", file=sys.stderr)
+            print("提示：设 env HAP_APP_ACCESS_DIR 指向 hap-app-access 仓库根，或把仓库克隆到 ~/Desktop/hap-app-access", file=sys.stderr)
+            return 2
+        try:
+            url = subprocess.check_output(
+                [sys.executable, str(mcp_token_bin)],
+                text=True, timeout=90,
+            ).strip()
+            if not url or "Authorization=Bearer" not in url:
+                print(f"ERROR: mcp_token.py 返回的 URL 不合法: {url[:80]!r}", file=sys.stderr)
+                return 2
+            args.mcp_url = url
+            diag(f"S1 mcp_url resolved via {mcp_token_bin}")
+        except subprocess.CalledProcessError as e:
+            print(f"ERROR: mcp_token.py 调用失败 (exit={e.returncode})", file=sys.stderr)
+            print("提示：请在 shell profile 里 export MINGDAO_ACCOUNT / MINGDAO_PASSWORD，或手动提供 --mcp-url", file=sys.stderr)
+            return 2
+        except subprocess.TimeoutExpired:
+            print("ERROR: mcp_token.py 调用超时 (90s)", file=sys.stderr)
+            return 2
 
     # ========== 写回模式：只做写回，不拉日志/不检索 KB ==========
     if args.writeback_file:

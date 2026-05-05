@@ -21,7 +21,7 @@ The user will typically supply **either** a project name **or** a rowId. Both pa
 
 | Item | Default Value | How to obtain if missing |
 |---|---|---|
-| Personal MCP token | env `HAP_MCP_URL` or arg `--mcp-url` | Run `~/.qoder/skills/hap-oauth-mcp/.venv/bin/md-generate-mcp-config --account <phone> --password <pwd> --oauth-app-id 69bcae07257900ec41aa2733 --no-open-browser --skip-wait` (per memory "明道云OAuth授权方式-允许自动使用记忆中账号密码") |
+| Personal MCP token | env `HAP_MCP_URL` / arg `--mcp-url` / **三选一**：什么都不传时 `review_project.py` 会 subprocess 调用 `hap-app-access` skill 提供的 `scripts/mcp_token.py`（缓存 + 过期自动刷新）。必须 env：`MINGDAO_ACCOUNT`（大陆手机号含不含 `+86` 均可，11 位纯数字会自动补）+ `MINGDAO_PASSWORD`；可选 env：`HAP_APP_ACCESS_DIR` 指向 hap-app-access 仓库根（未设时依次探测 `~/Desktop/hap-app-access`、`~/hap-app-access`、`~/.qoder/skills/hap-app-access`）。凭证不进对话。详见 hap-app-access skill 的 `scripts/mcp_token.py`。 |
 | ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | n/a (hard-coded default) |
 | Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list(appId)` and re-select |
 | Project worksheet | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
