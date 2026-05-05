@@ -21,7 +21,7 @@ The user will typically supply **either** a project name **or** a rowId. Both pa
 
 | Item | Default Value | How to obtain if missing |
 |---|---|---|
-| Personal MCP token | env `HAP_MCP_URL` / arg `--mcp-url` / **三选一**：什么都不传时 `review_project.py` 会 subprocess 调用 `hap-app-access` skill 提供的 `scripts/mcp_token.py`（缓存 + 过期自动刷新）。必须 env：`MINGDAO_ACCOUNT`（大陆手机号含不含 `+86` 均可，11 位纯数字会自动补）+ `MINGDAO_PASSWORD`；可选 env：`HAP_APP_ACCESS_DIR` 指向 hap-app-access 仓库根（未设时依次探测 `~/Desktop/hap-app-access`、`~/hap-app-access`、`~/.qoder/skills/hap-app-access`）。凭证不进对话。详见 hap-app-access skill 的 `scripts/mcp_token.py`。 |
+| Personal MCP token | **优先级**：arg `--mcp-url` > env `HAP_MCP_URL` > 直读 **hap-app-access Token Broker 中控服务**落盘的 token JSON（默认 `~/.local/share/hap-token-broker/tokens/claw-crm.json`）。三者都没时报错终止。**本 skill 不再自己刷 token**，刷新责任唯一属于 broker（守护进程 systemd 托管，详见 hap-app-access SKILL.md §5.10）。可选 env：`HAP_TOKEN_PROFILE`（默认 `claw-crm`）、`HAP_TOKEN_FILE`（显式覆盖文件路径）。调用前请确保 broker 已部署：`systemctl status hap-token-broker && hap-token status`。 |
 | ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | n/a (hard-coded default) |
 | Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list(appId)` and re-select |
 | Project worksheet | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
