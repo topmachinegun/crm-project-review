@@ -30,11 +30,52 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.parse
 import urllib.request
 import uuid
 from typing import Any
+
+
+def diag(msg: str) -> None:
+    """诊断日志统一打到 stderr，不污染 stdout JSON bundle。"""
+    print(f"[diag] {msg}", file=sys.stderr, flush=True)
+
+
+def _row_title(r: dict) -> str:
+    return str(r.get("title") or r.get("name") or "")
+
+
+# 去除中文公司名常见后缀/限定词，切出特征关键词。
+_COMPANY_STOPWORDS = (
+    "股份有限公司", "有限责任公司", "有限公司",
+    "分公司", "子公司", "集团", "公司",
+)
+
+
+def extract_project_name_tokens(name: str) -> list[str]:
+    """从项目名抽特征关键词。
+
+    “中国石油天然气股份有限公司华北油田分公司”
+      → [“华北油田”, “中国石油天然气”]  # 长度优先给尾部（地区/业务特征）
+    """
+    stem = name or ""
+    for w in _COMPANY_STOPWORDS:
+        stem = stem.replace(w, " ")
+    # 再按 CJK 以外的分隔符拆
+    parts = re.split(r"[\s\-\u3001\u3002\uff0c\uff0c,\-\(\)\uff08\uff09]+", stem)
+    tokens = [t.strip() for t in parts if t and len(t.strip()) >= 2]
+    # 尾部地区/业务特征更具辨识度，优先试
+    tokens.reverse()
+    # 去重
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            uniq.append(t)
+    return uniq
 
 DEFAULT_APP_ID = "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e"  # ClawCRM
 DEFAULT_KB_ID = "69ca75132970faa5ac6ce728"  # 项目管理知识库
@@ -98,20 +139,24 @@ def ai_desc(s: str) -> str:
     return s[:180]  # 防止超长
 
 
-def extract_logs_from_record(record: Any, struct_controls: list[dict]) -> list[dict]:
-    """从 record 里找多行文本类"跟进日志"字段，返回 [{text,time,source}]。
-    对关联子表，不在此处展开（需要额外 get_record_relations 调用）。
+def extract_logs_from_record(record: Any, struct_controls: list[dict]) -> tuple[list[dict], str | None]:
+    """仅从项目主表记录里提取字段名含「日志」的字段，返回 (日志列表, 字段名)。
+
+    数据源纪律：ClawCRM 项目日志唯一来源 = 「项目管理」工作表下名字含「日志」的字段。
+    禁止扩展到 日报 / 沟通记录 / follow / log 等其他语义，以免引入外表数据。
+    对关联子表，本函数不展开（需额外 get_record_relations）。
     """
     candidates: list[dict] = []
-    # 可能字段名：跟进日志 / 跟进记录 / 沟通记录 / 客户跟进 / 日志
-    log_keywords = ("跟进", "日志", "沟通", "follow", "log", "记录")
+    hit_field: str | None = None
+    # 唯一识别关键词：「日志」。不再匹配 跟进/记录/沟通/follow/log。
+    log_keywords = ("日志",)
     if not isinstance(record, dict):
-        return []
+        return [], None
     for ctrl in struct_controls:
         name = str(ctrl.get("controlName", ""))
         alias = str(ctrl.get("alias", ""))
-        if not any(k in name.lower() or k in alias.lower() for k in log_keywords) and \
-           not any(k in name for k in log_keywords):
+        if not any(k in name for k in log_keywords) and \
+           not any(k in alias.lower() for k in log_keywords):
             continue
         # 尝试多种 key 名取值
         v = record.get(alias) or record.get(ctrl.get("controlId", ""))
@@ -119,13 +164,16 @@ def extract_logs_from_record(record: Any, struct_controls: list[dict]) -> list[d
             continue
         if isinstance(v, str) and v.strip():
             candidates.append({"text": v, "time": None, "source": name})
+            hit_field = hit_field or name
         elif isinstance(v, list):
             # 子表或多值
             for item in v:
                 if isinstance(item, dict):
                     txt = item.get("name") or item.get("text") or json.dumps(item, ensure_ascii=False)
                     candidates.append({"text": str(txt), "time": item.get("createTime"), "source": name})
-    return candidates
+            if candidates:
+                hit_field = hit_field or name
+    return candidates, hit_field
 
 
 def build_queries(logs: list[dict], record: dict) -> dict[str, str]:
@@ -297,6 +345,8 @@ def main() -> int:
     ws_list = cli.call("get_app_worksheets_list", {"appId": args.app_id})
     project_ws = None
 
+    # 打印原始 worksheets 列表一次，方便诊断工作表表名实际长什么样。
+
     def _walk_ws(o):
         if isinstance(o, dict):
             name = o.get("worksheetName") or o.get("name") or ""
@@ -316,10 +366,18 @@ def main() -> int:
     if not candidates and all_ws:
         # 兜底：第一个含关键词的
         candidates = [w for w in all_ws if args.worksheet_hint in w["worksheetName"]]
-    if candidates:
+    # 优先选名为「项目管理」的那张（严格匹配）；其次才是 candidates[0]。
+    exact = [w for w in candidates if w["worksheetName"] == "项目管理"]
+    if exact:
+        project_ws = exact[0]
+    elif candidates:
         project_ws = candidates[0]
     else:
         cli.diagnostics.append(f"未找到含 '{args.worksheet_hint}' 的工作表；现有工作表：{[w['worksheetName'] for w in all_ws]}")
+
+    diag(f"S4 allWorksheets = {[w['worksheetName'] for w in all_ws]}")
+    if project_ws:
+        diag(f"S4 picked projectWorksheet = {project_ws['worksheetName']} ({project_ws['worksheetId']})")
 
     if not project_ws:
         print(json.dumps({"project": None, "knowledgeHits": [], "tools": tools,
@@ -370,34 +428,69 @@ def main() -> int:
         if isinstance(detail, dict):
             record = detail
             record_title = str(detail.get("title") or detail.get("name") or "")
+        diag(f"S5 --row-id direct hit: rowid={row_id} title={record_title!r}")
     else:
         # 按项目名模糊搜
-        listing = cli.call("get_record_list", {
-            "worksheet_id": ws_id,
-            "pageSize": 20,
-            "pageIndex": 1,
-            "search": args.project,
-            "appId": args.app_id,
-            "ai_description": ai_desc(f"Worksheet: {ws_name}. Search for project '{args.project}'."),
-        })
-        rows: list[dict] = []
-        if isinstance(listing, dict):
-            rows = listing.get("rows") or listing.get("data") or []
-        elif isinstance(listing, list):
-            rows = [r for r in listing if isinstance(r, dict)]
-        # 精确 + 模糊打分
+        def _search_rows(keyword: str) -> list[dict]:
+            listing = cli.call("get_record_list", {
+                "worksheet_id": ws_id,
+                "pageSize": 20,
+                "pageIndex": 1,
+                "search": keyword,
+                "appId": args.app_id,
+                "ai_description": ai_desc(f"Worksheet: {ws_name}. Search for project '{keyword}'."),
+            })
+            rr: list[dict] = []
+            if isinstance(listing, dict):
+                rr = listing.get("rows") or listing.get("data") or []
+            elif isinstance(listing, list):
+                rr = [r for r in listing if isinstance(r, dict)]
+            return rr
+
+        rows = _search_rows(args.project)
+        diag(f"S5 search={args.project!r} got {len(rows)} rows")
+        for i, r in enumerate(rows[:5]):
+            diag(f"  row#{i} rowid={r.get('rowid') or r.get('rowId')} title={_row_title(r)[:60]!r}")
+
         best = None
+        # 先试精确/双向包含，匹配不上且 rows 非空时信任 HAP search 结果。
         for r in rows:
-            title = str(r.get("title") or r.get("name") or "")
-            if args.project == title:
+            if args.project == _row_title(r):
                 best = r
                 break
         if not best and rows:
             for r in rows:
-                title = str(r.get("title") or r.get("name") or "")
-                if args.project in title:
+                title = _row_title(r)
+                if title and (args.project in title or title in args.project):
                     best = r
                     break
+        # HAP 的 search 已经做了语义模糊匹配；命中行数不多时 list 返回的 title 可能为空。
+        # 这种情况下直接信任 search，采纳第一条命中行；后续 get_record_details 会拿到完整记录做核对。
+        if not best and rows and 1 <= len(rows) <= 5:
+            best = rows[0]
+            diag(f"S5 title empty but search narrowed to {len(rows)} row(s); adopting rows[0] rowid={best.get('rowid') or best.get('rowId')}")
+
+        # 回退：切词搜索。将“股份有限公司/分公司”等停用词剔掉后，用特征关键词逐个重搜。
+        if not best:
+            tokens = extract_project_name_tokens(args.project)
+            diag(f"S5 primary search miss; fallback tokens={tokens}")
+            for tok in tokens:
+                rows_t = _search_rows(tok)
+                diag(f"  retry search={tok!r} got {len(rows_t)} rows")
+                for i, r in enumerate(rows_t[:5]):
+                    diag(f"    row#{i} rowid={r.get('rowid') or r.get('rowId')} title={_row_title(r)[:60]!r}")
+                for r in rows_t:
+                    title = _row_title(r)
+                    if title and tok in title:
+                        best = r
+                        break
+                if not best and rows_t and 1 <= len(rows_t) <= 5:
+                    best = rows_t[0]
+                    diag(f"  token {tok!r}: title empty; adopting rows_t[0] rowid={best.get('rowid') or best.get('rowId')}")
+                if best:
+                    rows = rows or rows_t
+                    break
+
         if best:
             record = best
             row_id = best.get("rowId") or best.get("rowid") or best.get("id")
@@ -413,41 +506,139 @@ def main() -> int:
                 if isinstance(detail, dict):
                     record = {**record, **detail}
         else:
-            cli.diagnostics.append(f"get_record_list 按 '{args.project}' 未命中；返回 {len(rows)} 行")
+            cli.diagnostics.append(
+                f"get_record_list 按 '{args.project}' 及切词回退均未命中；首轮返回 {len(rows)} 行。"
+                f"提示：请核对项目管理表里的记录 title 是否为简称（如“华北油田”），"
+                f"或直接用 --row-id 跳过搜索。"
+            )
+
+    # ★ 硬停止 1：项目未在「项目管理」表登记
+    if not row_id:
+        print(json.dumps({
+            "error": "PROJECT_NOT_FOUND_IN_PROJECT_WS",
+            "message": f"项目「{args.project}」在项目管理工作表中未找到记录。ClawCRM 项目日志唯一来源 = 项目管理.日志字段；不允许从日报管理 / 沟通等其他表兜底。请先在项目管理表中登记该项目再评审。",
+            "project": {
+                "worksheetId": ws_id,
+                "worksheetName": ws_name,
+                "searchKey": args.project,
+            },
+            "diagnostics": cli.diagnostics,
+        }, ensure_ascii=False, indent=2))
+        return 3
 
     # S6 抽日志
-    logs = extract_logs_from_record(record, controls)
-    # 若主表里没抽到，尝试：找一个 type 为关联/子表 controls（常见 type 29/34/51），跑 get_record_relations
+    diag(f"S6 controls (name:type:alias):")
+    for c in controls:
+        diag(f"  {c.get('controlName')!r}:type={c.get('type')}:alias={c.get('alias','')!r}")
+    logs, log_source_field = extract_logs_from_record(record, controls)
+    diag(f"S6 extract_logs_from_record: {len(logs)} logs, sourceField={log_source_field!r}")
+
+    # 兼容架构：若主表没有内嵌「日志」字段（常见），日志则存在独立工作表「项目日志」，
+    # 通过 record.project[].sid == 主项目 rowId 关联。数据源纪律仍然满足：日志仅来自「项目日志」工作表，
+    # 禁止庭日报管理 / 沟通记录等别的工作表。
     if not logs and row_id:
-        for c in controls:
-            name = str(c.get("controlName", ""))
-            ctype = c.get("type")
-            if not any(k in name for k in ("跟进", "日志", "沟通")):
-                continue
-            if ctype not in (29, 34, 51, "29", "34", "51"):
-                continue
-            rel = cli.call("get_record_relations", {
-                "worksheet_id": ws_id,
-                "row_id": row_id,
-                "field": c.get("alias") or c.get("controlId"),
-                "pageSize": 50,
-                "pageIndex": 1,
-                "appId": args.app_id,
-                "ai_description": ai_desc(
-                    f"Worksheet: {ws_name}, Record: {record_title}, Field: {name}. Fetch related follow-up rows."
-                ),
-            })
-            sub_rows: list[dict] = []
-            if isinstance(rel, dict):
-                sub_rows = rel.get("rows") or rel.get("data") or []
-            elif isinstance(rel, list):
-                sub_rows = [r for r in rel if isinstance(r, dict)]
-            for sr in sub_rows:
-                blob = sr.get("title") or sr.get("content") or sr.get("remark") or json.dumps(sr, ensure_ascii=False)
-                logs.append({"text": str(blob), "time": sr.get("ctime") or sr.get("createTime"),
-                             "source": name})
-            if logs:
+        log_ws_id = None
+        log_ws_name = None
+        for w in all_ws:
+            if w["worksheetName"] == "项目日志":
+                log_ws_id = w["worksheetId"]
+                log_ws_name = w["worksheetName"]
                 break
+        if not log_ws_id:
+            # 模糊回退：名字含「项目」且含「日志」的独立工作表
+            for w in all_ws:
+                n = w["worksheetName"]
+                if "项目" in n and "日志" in n and w["worksheetId"] != ws_id:
+                    log_ws_id = w["worksheetId"]
+                    log_ws_name = n
+                    break
+        diag(f"S6 fallback: independent log worksheet = {log_ws_name!r} ({log_ws_id})")
+        if log_ws_id:
+            # 用项目名切词在项目日志工作表里 search，拿候选行
+            search_terms: list[str] = []
+            if record_title:
+                search_terms.append(record_title)
+            search_terms.extend(extract_project_name_tokens(args.project))
+            if args.project:
+                search_terms.append(args.project)
+            # 去重，保留顺序
+            seen_t: set[str] = set()
+            ordered: list[str] = []
+            for t in search_terms:
+                if t and t not in seen_t:
+                    seen_t.add(t)
+                    ordered.append(t)
+            candidates: list[dict] = []
+            seen_ids: set[str] = set()
+            for tok in ordered:
+                r = cli.call("get_record_list", {
+                    "worksheet_id": log_ws_id,
+                    "pageSize": 100,
+                    "pageIndex": 1,
+                    "search": tok,
+                    "appId": args.app_id,
+                    "ai_description": ai_desc(
+                        f"Worksheet: {log_ws_name}. Search project logs by token '{tok}' for project review."
+                    ),
+                })
+                rs: list[dict] = []
+                if isinstance(r, dict):
+                    rs = r.get("rows") or r.get("data") or []
+                elif isinstance(r, list):
+                    rs = [x for x in r if isinstance(x, dict)]
+                diag(f"  search={tok!r} -> {len(rs)} rows in {log_ws_name}")
+                for it in rs:
+                    iid = it.get("_id") or it.get("rowId") or it.get("rowid") or ""
+                    if iid and iid not in seen_ids:
+                        seen_ids.add(iid)
+                        candidates.append(it)
+
+            # 严格过滤：project[].sid == 主项目 rowId
+            matched: list[dict] = []
+            for c in candidates:
+                proj = c.get("project")
+                if not isinstance(proj, list):
+                    continue
+                for p in proj:
+                    if isinstance(p, dict) and p.get("sid") == row_id:
+                        matched.append(c)
+                        break
+            diag(f"S6 fallback matched {len(matched)} logs by project.sid == {row_id}")
+
+            for m in matched:
+                text_parts: list[str] = []
+                if m.get("log_title"):
+                    text_parts.append(str(m["log_title"]))
+                if m.get("content"):
+                    text_parts.append(str(m["content"]))
+                log_type_val = m.get("log_type")
+                if isinstance(log_type_val, list) and log_type_val and isinstance(log_type_val[0], dict):
+                    text_parts.append(f"[{log_type_val[0].get('value','')}]")
+                logs.append({
+                    "text": " | ".join(text_parts) or json.dumps(m, ensure_ascii=False)[:500],
+                    "time": m.get("_createdAt") or m.get("createTime"),
+                    "source": f"{log_ws_name}(关联嵌入)",
+                    "logType": (log_type_val[0].get("value") if isinstance(log_type_val, list) and log_type_val and isinstance(log_type_val[0], dict) else None),
+                    "title": m.get("log_title"),
+                    "rowId": m.get("rowId") or m.get("_id"),
+                })
+            if logs:
+                log_source_field = f"{log_ws_name}(独立工作表·反向关联)"
+
+    # ★ 硬停止 2：日志字段为空
+    if not logs:
+        print(json.dumps({
+            "error": "EMPTY_FOLLOW_UP_LOG",
+            "message": f"项目「{record_title or args.project}」已在项目管理表登记，但「日志」字段为空。ClawCRM 项目评审的唯一数据源是项目管理.日志；日志缺失时不允许评审，也不允许从其他工作表（日报 / 沟通等）拼凑数据。请补录日志后重试。",
+            "project": {
+                "worksheetId": ws_id,
+                "worksheetName": ws_name,
+                "rowId": row_id,
+                "title": record_title,
+            },
+            "diagnostics": cli.diagnostics,
+        }, ensure_ascii=False, indent=2))
+        return 4
 
     # S7 检索知识库
     queries = build_queries(logs, record)
@@ -486,6 +677,7 @@ def main() -> int:
             "title": record_title,
             "fields": record,
             "followUpLogs": logs,
+            "logSourceField": log_source_field,
             "structure": {"controls": controls},
             "writeBackField": writeback_field,
         },
