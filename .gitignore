@@ -1,0 +1,26 @@
+# 临时评审输出（可能含真实客户信息）
+.tmp/
+*.bundle.json
+project_bundle*.json
+review_*.md
+!*/scripts/review_project.py
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# 敏感
+*.env
+*.pem
+*secret*
+*token*
+HAP_MCP_URL*
