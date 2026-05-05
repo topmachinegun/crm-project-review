@@ -1,6 +1,8 @@
 # crm-project-review
 
-一个 [Qoder Agent Skill](https://qoder.com)，基于明道云项目管理知识库对 ClawCRM 里的项目记录进行 AI 评审，输出「阶段判定 / ICP 匹配度 / 风险点 / 下一步动作 / SOP 偏离度」五维结构化报告，可选写回到 ClawCRM 指定字段。
+一个 **Agent Skill**（遵循 Anthropic 开放的 [Agent Skills](https://docs.claude.com/en/docs/agents-and-tools/agent-skills) 约定：YAML frontmatter + Markdown），基于明道云项目管理知识库对 ClawCRM 里的项目记录进行 AI 评审，输出「阶段判定 / ICP 匹配度 / 风险点 / 下一步动作 / SOP 偏离度」五维结构化报告，可选写回到 ClawCRM 指定字段。
+
+> 本 skill 不绑定任何特定 agent 客户端（Qoder / Claude Code / Cursor / 自研 agent 等均可直接使用）。
 
 ## 功能
 
@@ -21,7 +23,15 @@
 
 ## 安装
 
-把 `.qoder/skills/crm-project-review/` 整个目录复制到目标工作区的 `.qoder/skills/` 下，或放到用户级 `~/.qoder/skills/`。
+本 skill 的实体在 `.qoder/skills/crm-project-review/`（为了 Qoder 开箱即用），但内容本身完全通用。请按你使用的 agent 客户端把整个 `crm-project-review/` 目录复制到对应位置：
+
+| Agent 客户端 | 工作区导入 | 用户级导入 |
+|---|---|---|
+| Qoder | `.qoder/skills/crm-project-review/` | `~/.qoder/skills/crm-project-review/` |
+| Claude Code | `.claude/skills/crm-project-review/` | `~/.claude/skills/crm-project-review/` |
+| 其他遵循 Agent Skills 约定的客户端 | 参照该客户端文档 | 同左 |
+
+只需 `SKILL.md` + `scripts/` 同时拷贝。skill 无额外依赖（标准库的 Python 3 即可运行）。
 
 ## 使用
 
