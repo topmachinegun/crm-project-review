@@ -19,60 +19,62 @@ The user will typically supply **either** a project name **or** a rowId. Both pa
 
 ## 2. Prerequisites
 
-### 2.0 Auth Channels（授权通道，必读）
+### 2.0 架构前提（v0.3.0 起）
 
-ClawCRM 这个应用同时具备两种授权凭据，是返回到 `hap-app-access` 所描述的8格授权矩阵中的两维：
+本 skill **不直接管 HAP 凭据，也不碰 MCP / V3 传输层**。所有对明道 HAP 的访问统一走 `hap-app-access` skill 的 `hap-access` CLI（详见其 SKILL.md §5.11 Profile / §5.12 CLI）：
 
-| 通道 | 凭据类型 | 权限范围 | 适用场景 | 凭据来源 |
-|---|---|---|---|---|
-| **A. Personal MCP (OAuth Bearer)** | 个人级 Bearer Token | 登录用户自己的数据范围 | 有人值守 / 需要以具体销售负责人身份行动 / 快速验证 | `hap-oauth-mcp` 走 OAuth 登录的 broker（见 §2.1） |
-| **B. App-level AppKey + Sign** | `appkey` + `sign` + `token`（应用级） | **整个 ClawCRM 应用**的数据范围。不受个人 Token 有效期影响 | 无人值守自动化 / 服务端任务 / CI / 定时批评 | ClawCRM 管理后台 > 应用开发者设置，由 org admin 生成后分发 |
+- **凭据位置唯一事实源**：`~/.local/share/hap-app-access/profiles/<name>.json`（0600 权限）
+- **访问 mode 由 profile 决定**：`personal_mcp` / `app_mcp` / `v3_api` 任选其一，本 skill 无感
+- **MCP 注入字段由 CLI 接手**：`appId` / `ai_description` / `HAP-Appkey` / `HAP-Sign` 等一律不再由业务 skill 传入
 
-**请按场景选通道**。本 skill 当前版本（v0.1.x）的脚本默认走通道 A；通道 B 的实际调用实现由 `hap-app-access` 统一参见。**无论哪条通道，本 skill 的业务坐标（appId / worksheetId / controlId / 知识库库 ID）均不变**。
+本 skill 的业务 skill 约定：
 
-### 2.1 Channel A 凭据（Personal MCP）
+| 项 | 值 | 说明 |
+|---|---|---|
+| 默认 profile | `claw-crm` | 通过 `--profile <name>` 或 env `HAP_ACCESS_PROFILE` 覆盖 |
+| hap-access 定位 | env `HAP_ACCESS_BIN` > `$PATH` > `~/Desktop/hap-app-access/scripts/hap-access` > `/opt/hap-app-access/scripts/hap-access` | 脚本首个 diag 行会打印选中的路径 |
+| 业务坐标 | worksheetId / controlId / 知识库 id 保持稳定 | 见 §2.1 |
 
-优先级：`--mcp-url` > env `HAP_MCP_URL` > broker 落盘文件（默认 `~/.local/share/hap-token-broker/tokens/claw-crm.json`）。三者都没时报错终止。**本 skill 不再自己刷 token**，刷新责任唯一属于 broker（守护进程 systemd 托管，详见 hap-app-access SKILL.md §5.10）。
+**前置部署**（一次性）：
+1. 按 `hap-app-access` SKILL.md §5.10 部署 Token Broker（若 profile 选 `personal_mcp` 且 `token_source=broker:...`）
+2. 创建 profile `claw-crm.json`，推荐直接用本 skill 随包的模板（预设 `app_id` / `ai_description` / `api_base`，上线时只填 AppKey + Sign 即可）：
+   ```bash
+   mkdir -p ~/.local/share/hap-app-access/profiles
+   cp skills/crm-project-review/config/profile.claw-crm.template.json \
+      ~/.local/share/hap-app-access/profiles/claw-crm.json
+   chmod 600 ~/.local/share/hap-app-access/profiles/claw-crm.json
+   # 编辑该副本：替换 <REPLACE_WITH_CLAWCRM_APPKEY> / <REPLACE_WITH_CLAWCRM_SIGN>；删除 _readme / _alternatives 字段
+   hap-access profile --validate claw-crm   # 必须通过
+   ```
+   模板默认 `mode=app_mcp`（无人值守，保留 `knowledge_search`）；要切 `personal_mcp` / `v3_api` 见模板 `_alternatives` 或 hap-app-access §5.11。亦可用 CLI 交互式创建：
+   ```bash
+   hap-access profile --init claw-crm --mode personal_mcp \
+     --token-source broker:claw-crm \
+     --app-id 49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e \
+     --ai-description "ClawCRM Project Review"
+   ```
+3. 换 mode 零代码修改：把 profile 改成 `app_mcp` 或 `v3_api`（前提是所用工具在目标 mode 下可映射；`knowledge_search` 在 `v3_api` 下不可用，会报 `UnsupportedTool`）
 
-可选 env：`HAP_TOKEN_PROFILE`（默认 `claw-crm`）、`HAP_TOKEN_FILE`（显式覆盖文件路径）。调用前请确保 broker 已部署：`systemctl status hap-token-broker && hap-token status`。
-
-### 2.2 Channel B 凭据（AppKey + Sign）
-
-默认约定从以下环境变量读取（与 `hap-app-access` 保持一致），**绝不能**写回仓库：
-
-```bash
-export HAP_APP_KEY="<应用 AppKey>"       # 应用开发者后台直接复制，静态字串
-export HAP_SIGN_KEY="<应用 Sign>"       # 同上，预分发的静态字串；无需客户端 HMAC
-export HAP_API_BASE="https://api.mingdao.com"   # 默认。私有化部署带 `/api` 后缀，如 https://p-xxx.com/api
-export HAP_AUTH_CHANNEL="appkey"                # 可选；或调用时显式传 `--auth-channel appkey`
-```
-
-- **鉴权**：HTTP header `HAP-Appkey` + `HAP-Sign` 原样透传（而非 URL query）。
-- **Endpoint**：`{HAP_API_BASE}/v3/open/<module>/<action>`，如 `worksheet/editRow`。
-- **业务坐标不变**：appId / worksheetId / controlId 同 §2.3、§8；但要注意V3 API 请求体用 `worksheetId` / `rowId` / `controls` / `controlId`（而 MCP 请求混用 `worksheet_id` / `row_id` / `fields` / `id`）。
-- **适用场景**：需要在无个人登录下运行（定时任务 / 外部 agent / openclaw 后台调度）时，**优先选通道 B**，绕开个人 Token 刷新链路。
-- **本版本（v0.2.0）脚本覆盖范围**：`--auth-channel=appkey` 已端到端支持**写回模式**（`--writeback-file`）。评审数据采集（项目/日志 → 知识库检索）所需的 `knowledge_search` 在 V3 REST API 中 **没有等价物** （见 hap-app-access §8.14 的 fallback 分析），因此评审主流程仍以通道 A 为权威路径；计划在后续版本用“应用级 MCP URL”（`api.mingdao.com/mcp?HAP-Appkey=...&HAP-Sign=...`）做知识库检索的纯无个人凭据取代。
-
-### 2.3 业务坐标
+### 2.1 业务坐标
 
 | Item | Default Value | How to obtain if missing |
 |---|---|---|
-| ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | n/a (hard-coded default) |
-| Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list(appId)` and re-select |
+| ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | **由 profile 管理**（profile `claw-crm.json` 的 `app_id` 字段）；本表仅为归档记录 |
+| Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list` and re-select |
 | Project worksheet | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
 | Follow-up log source | 两种合法形态之一：**(a)** 项目管理工作表里 `controlName` 含「日志」的字段（主表直属字段或同表下的子表）；**(b)** 同 app 下独立工作表「项目日志」(默认 id `69ca1fc9d128aadb0c749edf`)，通过其 `project` 关联字段 `project[].sid == 主项目 rowId` 反向关联。**两者任一命中即可**，均为合法唯一数据源。**禁止**从 日报管理 / 沟通记录 / follow / log 等别的工作表或字段拼凑。详见 §3.1 数据源纪律。 |
 | Write-back field | **controlId = `69f956419f1956fc0e1867c3`**（name `AI评估`，alias `ai_evaluation`，Type Text 多行。已确认存在于项目管理工作表） | 直接用此 controlId 写回，**不必**再调 `get_worksheet_structure` 去发现字段；若写回返回 `controlId not found`，才提示用户人工去 HAP UI 核查 |
 
-## 3. Iron Rule (inherits hap-app-access v1.5 §7.1)
+## 3. Iron Rule（v0.3.0 起由 hap-access CLI 承担）
 
-**Always call `tools/list` once at the beginning of a session and drive every subsequent `tools/call` strictly by the returned `inputSchema`.** Observed quirks in this Personal MCP:
+参数名大小写混用、`ai_description` 必填、`appId` 注入、错误码 10001 归因等**传输层铁律已下沉到 `hap-app-access` skill（见其 §7.1 / §8.10 / §8.12 / §9 等）**。本 skill 只负责业务流程，按以下约定即可：
 
-- Same tool mixes snake_case and camelCase keys: `update_record` requires `worksheet_id`, `row_id`, `fields` **and** `appId` in one call.
-- `get_app_list` uses `org_id` (snake_case); `get_app_knowledge_list` / `knowledge_search` use `appId` (camelCase).
-- **Every record-related tool requires an `ai_description` string** (a natural-language description of what you're doing, e.g. `"Worksheet: 项目库, Record: XYZ客户. Fetch full record details."`). Missing it yields `10001 Http Headers verification failed`.
-- Error `10001` almost always means **a wrong input key name or a missing `ai_description`**, not a token/header problem.
+- **调工具按名字**：`hap-access call --profile <name> --tool <name> --args <json>`，返回 `{ok, data, error, diagnostics}` 统一 shape
+- **args 只写业务参数**：如 `worksheet_id` / `row_id` / `pageSize` / `search` / `fields` / `knowledgeIds` / `query` 等。**不传** `appId` / `ai_description` / `appkey` / `sign` / `mcp_url`——这些由 hap-access 按 profile 自动注入
+- **Schema 校验**：由 hap-access CLI + 明道服务端共同把关；业务 skill 不再缓存 `tools/list` 的 inputSchema。必要时可调 `hap-access list-tools --profile <name>` 拿工具名列表（本脚本 bundle 的 `tools` 字段就是这份列表）
+- **跨工具传参**：上游返回 `rowid` / `worksheetId` 等驼峰/小写，下游入参需改写成 `row_id` / `worksheet_id`（snake_case）。这条纪律保留在业务 skill 侧，参见 hap-app-access §8.15
 
-See `learned_skill: Personal MCP 知识库发现+检索全链路调用指南` for the full cheat sheet.
+See `learned_skill: Personal MCP 知识库发现+检索全链路调用指南` for historical reference (v0.2.x 前的自实现 MCP 客户端)。
 
 ### 3.1 数据源纪律（Single Source of Truth）
 
@@ -91,15 +93,15 @@ See `learned_skill: Personal MCP 知识库发现+检索全链路调用指南` fo
 
 ## 4. End-to-End Workflow
 
-> **前提：已按 §2.0 选好授权通道**。下面的 S1–S10 检查单描述的是**通道 A（Personal MCP）**的流程，也是当前脚本评审主流程的唯一实现。如果仅做“写回 AI评估”（S9），可直接切换通道 B：脚本传 `--auth-channel appkey` 即可，底层走 V3 REST `worksheet/editRow`，具体见 §8.4。评审数据采集（S3–S8）有依赖 `knowledge_search`，暂依赖通道 A；后续版本计划用应用级 MCP URL 做纯无个人凭据版本。业务坐标和五维 Rubric 均不变。
+> **前提：已按 §2.0 部署好 hap-access + profile `claw-crm`**。下面的 S1–S10 检查单描述的是默认 profile（`personal_mcp` mode）下的完整流程，也是当前脚本的唯一实现。换 mode（`app_mcp` / `v3_api`）时业务坐标和五维 Rubric 均不变；但 `knowledge_search`（S7）在 `v3_api` profile 下不可用（`UnsupportedTool`），评审主流程必须走带 MCP 协议的 mode（`personal_mcp` 或 `app_mcp`）。
 
 Copy this checklist and tick each step:
 
 ```
-- [ ] S1 Resolve MCP URL (reuse env or generate new token)
-- [ ] S2 initialize + tools/list, cache schemas for the tools below
-- [ ] S3 Locate ClawCRM appId (default or via get_org_list → get_app_list(org_id))
-- [ ] S4 Discover project worksheet + follow-up field
+- [ ] S1 Resolve hap-access CLI + profile（脚本自动：打印 bin 路径 + profile 名）
+- [ ] S2 (可选) hap-access list-tools 拿工具名列表，存入 bundle.tools
+- [ ] S3 （已废弃）appId 由 profile 管，业务 skill 不再解析
+- [ ] S4 get_app_worksheets_list 找项目工作表
 - [ ] S5 Resolve the target project record (by rowId OR by name match)
 - [ ] S6 Fetch the record's follow-up logs (full text + timestamps)
 - [ ] S7 Build query terms from the logs; call knowledge_search (hybrid, topK=8)
@@ -133,9 +135,8 @@ The heavy discovery + fetch + search work is pre-scripted. Invoke it and consume
 # <SKILL_ROOT> = the directory that contains THIS SKILL.md
 # i.e. run: SKILL_ROOT="$(dirname "$(realpath SKILL.md)")"
 python3 "$SKILL_ROOT/scripts/review_project.py" \
-  --mcp-url "https://api2.mingdao.com/mcp?Authorization=Bearer%20<TOKEN>" \
+  --profile claw-crm \
   --project "XYZ有限公司" \
-  --app-id 49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e \
   --knowledge-id 69ca75132970faa5ac6ce728 \
   --topk 8 \
   > /tmp/project_bundle.json
@@ -143,11 +144,12 @@ python3 "$SKILL_ROOT/scripts/review_project.py" \
 
 Or by rowId:
 ```bash
-python3 "$SKILL_ROOT/scripts/review_project.py" \
-  --mcp-url "$HAP_MCP_URL" --row-id <ROW_ID>
+python3 "$SKILL_ROOT/scripts/review_project.py" --profile claw-crm --row-id <ROW_ID>
 ```
 
-The script outputs a single JSON document with `{project, knowledgeHits, tools}`. The agent then writes the report using that bundle and the Rubric in §5.
+`--profile` 省略时取 env `HAP_ACCESS_PROFILE`，再不给则默认 `claw-crm`。脚本会在启动时探测 `hap-access` 并打印实际路径，未安装 hap-app-access 时 fail-fast。
+
+The script outputs a single JSON document with `{project, knowledgeHits, tools, diagnostics}`. The agent then writes the report using that bundle and the Rubric in §5.
 
 ## 5. Fixed Rubric (five dimensions)
 
@@ -234,19 +236,19 @@ Every dimension must cite at least one `knowledgeHits[].chunkId` if the KB has r
 - 不要用 `controlName == "AI评估"` 或 `alias == "ai_evaluation"` 去模糊匹配后再取 controlId（OpenClaw 2026-04 实战里就卡在这一步找不到字段失败）；
 - 不要把读回的 bundle 里 `project.writeBackField` 为 null 解读为“字段不存在”——只说明脚本在该环境的 structure 返回里没能匹配到，**不代表字段已删除**。
 
-### 8.1 标准写回调用
+### 8.1 标准写回调用（通过 hap-access CLI）
 
-```json
-{
+```bash
+hap-access call --profile claw-crm --tool update_record --args '{
   "worksheet_id": "69ca1fb1d128aadb0c749d49",
   "row_id": "<project_row_id>",
-  "appId": "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e",
-  "fields": [{"id": "69f956419f1956fc0e1867c3", "value": "<markdown_report>"}],
-  "ai_description": "Worksheet: 项目管理, Record: <title>. Write AI review report into AI评估 field."
-}
+  "fields": [{"id": "69f956419f1956fc0e1867c3", "value": "<markdown_report>"}]
+}'
 ```
 
-**注意**：fields 数组里字段的 key 是 `id`（不是 `controlId`）——`update_record` 的 schema 明确要求（见 §3 铁律 + `hap-app-access` 约定）。
+- `appId` / `ai_description` **不要传**——hap-access 在 `personal_mcp` mode 下自动注入
+- `fields[].id` 是 MCP 风格；若 profile 是 `v3_api` mode，hap-access 内部会转成 V3 的 `controls[].controlId` 结构
+- 实际使用中更推荐调用 `review_project.py --writeback-file`，脚本已封装好（见 §8.2）
 
 ### 8.2 优先走脚本写回模式
 
@@ -265,29 +267,27 @@ python3 "$SKILL_ROOT/scripts/review_project.py" \
 - 仅当 `update_record` 本身返回 `10001 controlId not found` 或类似错误 → 提示用户去 HAP UI 检查字段是否被误删；才**禁止**自动创建新字段。
 - 其他错误：原样透出，保留完整报告在对话中，**不**要截断、**不**要静默重试。
 
-### 8.4 若走通道 B（AppKey + Sign → V3 REST API）
+### 8.4 换 mode 写回（通过 profile 切换，零代码修改）
 
-**本版本脚本已实现**：`--auth-channel=appkey` + `--writeback-file`。端到端例子：
+v0.3.0 起，切换传输层只需换 profile，不需要脚本参数：
 
 ```bash
-export HAP_APP_KEY="<AppKey>"
-export HAP_SIGN_KEY="<Sign>"
-python3 "$SKILL_ROOT/scripts/review_project.py" \
-  --auth-channel appkey \
-  --row-id <ROW_ID> \
-  --writeback-file <报告.md>
+# 走应用级 AppKey+Sign（MCP 协议）：
+hap-access profile --init claw-crm-app --mode app_mcp --appkey <...> --sign <...>
+python3 "$SKILL_ROOT/scripts/review_project.py" --profile claw-crm-app \
+  --row-id <ROW_ID> --writeback-file <报告.md>
+
+# 走 V3 REST（适合没 MCP 集成的服务端）：
+hap-access profile --init claw-crm-v3 --mode v3_api --appkey <...> --sign <...>
+python3 "$SKILL_ROOT/scripts/review_project.py" --profile claw-crm-v3 \
+  --row-id <ROW_ID> --writeback-file <报告.md>
 ```
 
-底层调用为 `POST {HAP_API_BASE}/v3/open/worksheet/editRow`。请求体核心字段：
+hap-access 内部会把 MCP 风格的 `fields=[{id, value}]` 自动映射为 V3 风格的 `controls=[{controlId, value}]`，并改走 `POST {api_base}/v3/open/worksheet/editRow`。业务 skill **完全不感知**字段结构差异。
 
-- Header：`HAP-Appkey: <AppKey>`、`HAP-Sign: <Sign>`
-- `worksheetId` = `69ca1fb1d128aadb0c749d49`（同上，业务坐标不因通道而变）
-- `rowId` = 项目记录 rowId
-- `controls` = `[{"controlId": "69f956419f1956fc0e1867c3", "value": "<markdown_report>"}]`
-
-**误区提醒**：V3 API 的字段 key 是 `controlId`（而 MCP `update_record` 是 `id`）——两者 schema 差异正是 §3 铁律所指的“以 `tools/list` / API 文档为准”，**不要把 MCP 的 `fields.id` 约定搬到 V3 API 上**。
-
-**覆盖边界**：本版本`--auth-channel=appkey` **仅支持写回分支**。评审数据采集（拉项目/日志 + 知识库检索）仍强制走通道 A；主要原因是 `knowledge_search` RAG 在 V3 REST API 中没有等价端点（见 hap-app-access §8.14），降级为关键字筛选会丢失语义评分。后续版本计划用“应用级 MCP URL”（`api.mingdao.com/mcp?HAP-Appkey=...&HAP-Sign=...`）做评审主流程的纯无个人凭据版本。
+**限制**：
+- `v3_api` mode **不支持 `knowledge_search`**（会抛 `UnsupportedTool`），因此评审主流程只能走 `personal_mcp` / `app_mcp`；写回分支可随意切
+- 参数名差异、域名白名单、错误码归因等传输层陷阱全部落在 hap-app-access，详见其 §8
 
 ## 9. Common Pitfalls
 
@@ -299,11 +299,11 @@ python3 "$SKILL_ROOT/scripts/review_project.py" \
 | Multiple apps named "CRM" across orgs | Name collision | Filter by `appName.strip().lower() == "clawcrm"` AND org = "明道云数字化企业" |
 | KB hits look off-topic | Query too literal | Extract action verbs + industry terms, not raw log sentences |
 | `update_record` silently no-op | Wrong `controlId` | Re-run `get_worksheet_structure` and map by `controlName`, not English guess |
-| Tokens leaked in shell history | `--password` inline | Use the script's `HAP_MCP_URL` env var path instead |
+| Tokens leaked in shell history | inline 凭据 | **不在本 skill 讨论**：本 skill 不再接受任何凭据参数；凭据只能落在 hap-access profile（0600，见 hap-app-access §5.11） |
 
 ## 10. Related
 
-- `hap-app-access` skill — protocol and path decisions (v1.5)
+- `hap-app-access` skill — protocol and path decisions (v1.6, 提供 hap-access CLI + profile)
 - `hap-oauth-mcp` skill — token generation pipeline
 - learned_skill `Personal MCP 知识库发现+检索全链路调用指南` — end-to-end call cheat sheet
 

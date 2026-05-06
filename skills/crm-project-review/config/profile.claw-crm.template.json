@@ -1,0 +1,41 @@
+{
+  "_readme": [
+    "ClawCRM access-profile TEMPLATE for hap-app-access (v1.6+, see hap-app-access SKILL.md §5.11).",
+    "This file is SAFE to commit — it contains placeholders only, no real credentials.",
+    "",
+    "Deploy on target server:",
+    "  mkdir -p ~/.local/share/hap-app-access/profiles",
+    "  cp skills/crm-project-review/config/profile.claw-crm.template.json \\",
+    "     ~/.local/share/hap-app-access/profiles/claw-crm.json",
+    "  chmod 600 ~/.local/share/hap-app-access/profiles/claw-crm.json",
+    "  # edit the copy: replace every <...> placeholder, delete _readme/_alternatives fields",
+    "  hap-access profile --validate claw-crm",
+    "",
+    "Mode decision (this template defaults to app_mcp, see _alternatives for the other two):",
+    "  - personal_mcp : OAuth Bearer, interactive sessions; needs §5.10 Token Broker",
+    "  - app_mcp      : AppKey+Sign over MCP protocol; unattended/server (RECOMMENDED)",
+    "  - v3_api       : AppKey+Sign over REST; write-back only (knowledge_search unavailable)"
+  ],
+  "_alternatives": {
+    "personal_mcp": {
+      "mode": "personal_mcp",
+      "app_id": "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e",
+      "ai_description": "ClawCRM Project Review Agent",
+      "token_source": "broker:claw-crm",
+      "api_base": "https://api.mingdao.com"
+    },
+    "v3_api": {
+      "mode": "v3_api",
+      "appkey": "<HAP_APPKEY>",
+      "sign": "<HAP_SIGN>",
+      "api_base": "https://api.mingdao.com",
+      "_note": "v3_api does NOT support knowledge_search; only use for pure write-back."
+    }
+  },
+  "mode": "app_mcp",
+  "app_id": "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e",
+  "ai_description": "ClawCRM Project Review Agent",
+  "appkey": "<REPLACE_WITH_CLAWCRM_APPKEY>",
+  "sign": "<REPLACE_WITH_CLAWCRM_SIGN>",
+  "api_base": "https://api.mingdao.com"
+}

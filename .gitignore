@@ -24,3 +24,7 @@ Thumbs.db
 *secret*
 *token*
 HAP_MCP_URL*
+
+# hap-access profile: 模板可提交，真值不允许入仓
+config/profile.*.json
+!config/profile.*.template.json

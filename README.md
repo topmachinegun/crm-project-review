@@ -13,12 +13,13 @@
 
 ## 定位
 
-这是一个**业务层** skill，专注于评审业务逻辑本身。授权、MCP 协议调用等基础设施职责由前置 skill 承担：
+这是一个**业务层** skill，专注于评审业务逻辑本身。**v0.3.0 起**本 skill 不再直接处理任何凭据或传输层细节，全部下沉到 `hap-app-access`：
 
 | 职责 | 承担 skill |
 |---|---|
-| MCP Token 生成 / 刷新 | [`hap-oauth-mcp`](https://github.com/mingdaocom/hap-skills) |
-| MCP 协议调用规范 | [`hap-app-access`](https://github.com/mingdaocom/hap-skills) |
+| 凭据存放（AppKey+Sign / Personal MCP URL / V3 API base） | [`hap-app-access`](https://github.com/mingdaocom/hap-skills) §5.11 profile |
+| MCP / V3 API 调用 + `{ok, mode, data, diagnostics}` 统一契约 | [`hap-app-access`](https://github.com/mingdaocom/hap-skills) §5.12 `hap-access` CLI |
+| Personal MCP token 生成 / 刷新 | [`hap-oauth-mcp`](https://github.com/mingdaocom/hap-skills) |
 | 项目评审业务本身 | 本 skill |
 
 ## 安装
@@ -42,51 +43,64 @@
 
 ### 运行前置
 
-ClawCRM 同时具备两种授权凭据，请按场景选（详见 [SKILL.md §2.0](./skills/crm-project-review/SKILL.md)）：
+1. 安装并可调用 `hap-access` CLI（由 `hap-app-access` skill 提供，见其 §5.12）。
+2. 建好 profile（默认名 `claw-crm`）。**推荐**用本仓随包的模板复制到服务器后填值：
 
-- **通道 A（Personal MCP / OAuth Bearer，默认）**：有人值守场景；需配置 `HAP_MCP_URL`（由 `hap-oauth-mcp` 生成）。
-- **通道 B（AppKey + Sign → HAP V3 REST API）**：无人值守 / CI / 服务端场景；需配置 `HAP_APP_KEY` + `HAP_SIGN_KEY`。**本版本**脚本 `--auth-channel=appkey` 仅支持**写回**分支；评审数据采集仍走通道 A。
+   ```bash
+   mkdir -p ~/.local/share/hap-app-access/profiles
+   cp skills/crm-project-review/config/profile.claw-crm.template.json \
+      ~/.local/share/hap-app-access/profiles/claw-crm.json
+   chmod 600 ~/.local/share/hap-app-access/profiles/claw-crm.json
+   # 编辑副本：替换 <REPLACE_WITH_CLAWCRM_APPKEY> / <REPLACE_WITH_CLAWCRM_SIGN>
+   # 删除 _readme 和 _alternatives 字段
+   hap-access profile --validate claw-crm
+   ```
 
-ClawCRM 项目管理工作表里需存在 `AI评估` 多行文本字段（如需回传）。
+   模板默认 `mode=app_mcp`（无人值守场景），`_alternatives` 里并列了 `personal_mcp` / `v3_api` 的变体；或直接走 `hap-access profile --init claw-crm --mode ...` 交互式创建。
+   profile 字段约定详见 [hap-app-access SKILL.md §5.11](https://github.com/mingdaocom/hap-skills)；业务 skill 完全不接触 `HAP_MCP_URL` / `HAP_APP_KEY` / `HAP_SIGN_KEY` 等环境变量。
+3. ClawCRM 项目管理工作表里需存在 `AI评估` 多行文本字段（如需回传）。
 
-### 典型流程（通道 A）
+### 典型流程
 
 ```bash
-export HAP_MCP_URL="<由 hap-oauth-mcp 生成>"
-
 # 1) 拉取证据（项目记录 + 跟进日志 + KB 命中）
 python3 skills/crm-project-review/scripts/review_project.py \
+  --profile claw-crm \
   --project "XYZ有限公司" --topk 8 > bundle.json
 
 # 2) agent 根据 bundle 撰写报告，落盘为 report.md
 
 # 3) 把报告写回 AI评估 字段
 python3 skills/crm-project-review/scripts/review_project.py \
+  --profile claw-crm \
   --row-id <ROW_ID> --writeback-file report.md
 ```
 
-### 通道 B：纯无个人凭据写回
+`--profile` 可省略，脚本默认读取 env `HAP_ACCESS_PROFILE`，再 fallback 到 `claw-crm`。
+
+### 切换 mode 零代码
+
+要把写回路径从 Personal MCP 换成 AppKey+Sign（V3 API），**不需要改任何代码或命令行参数**，只改 profile：
 
 ```bash
-export HAP_APP_KEY="<AppKey>"
-export HAP_SIGN_KEY="<Sign>"
-
-# 报告已有时的纯写回：不走任何个人 OAuth
+hap-access profile --init claw-crm-writeback --mode v3_api
 python3 skills/crm-project-review/scripts/review_project.py \
-  --auth-channel appkey \
+  --profile claw-crm-writeback \
   --row-id <ROW_ID> --writeback-file report.md
 ```
 
-底层 `POST /v3/open/worksheet/editRow`，header `HAP-Appkey` + `HAP-Sign` 原样透传。
+注意：`v3_api` mode 不支持 `knowledge_search`（hap-access 会抛 `UnsupportedTool`），因此评审主流程仍须走 `personal_mcp` / `app_mcp`，写回分支可随意切。
 
-详见 [SKILL.md](./skills/crm-project-review/SKILL.md) §2.2 / §8.4。
+详见 [SKILL.md](./skills/crm-project-review/SKILL.md) §2.0 / §8.4。
 
 ## 业务坐标
 
-本 skill 内置的坐标针对**特定 ClawCRM 应用**，如果你的 CRM 结构不同，请修改 `scripts/review_project.py` 里的 `DEFAULT_*` 常量或在 `SKILL.md` §3 中覆盖：
+本 skill 内置的坐标针对**特定 ClawCRM 应用**，如果你的 CRM 结构不同，请修改 `scripts/review_project.py` 里的 `DEFAULT_*` 常量或在 `SKILL.md` §2.1 中覆盖：
 
-- `appId`、项目管理知识库 ID、项目 / 日志 工作表 ID
+- 项目管理知识库 ID、项目 / 日志 工作表 ID
 - `项目名 / 日志关联 / AI评估` 字段 ID
+
+> `appId` 由 profile 管理，**不再**出现在业务脚本里。
 
 ## 许可证
 
