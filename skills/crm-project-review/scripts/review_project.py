@@ -25,6 +25,16 @@
     }
 
 Agent 拿到 JSON 后，按 SKILL.md §5 Rubric 生成报告；§8 Write-back。
+
+授权通道：
+- 通道 A（Personal MCP / OAuth Bearer，默认）：读 `HAP_MCP_URL` / `--mcp-url` / broker 落盘 token JSON。
+- 通道 B（应用级 AppKey + Sign 走 HAP V3 REST API）：新增 `--auth-channel appkey`（或 env
+  `HAP_AUTH_CHANNEL=appkey`），凭据从 `HAP_APP_KEY` + `HAP_SIGN_KEY` 读；本版本（v0.2.0）
+  **端到端支持写回分支**（`--writeback-file`），底层走 `POST /v3/open/worksheet/editRow`；
+  评审主流程因依赖 `knowledge_search` 该个 V3 无等价端点，仍强制通道 A。完整背景
+  和边界见 SKILL.md §2.2 / §8.4。
+环境变量（与 `hap-app-access` 一致）：`HAP_APP_KEY`、`HAP_SIGN_KEY`、
+`HAP_API_BASE`（默认 https://api.mingdao.com）。
 """
 from __future__ import annotations
 import argparse
@@ -34,6 +44,7 @@ import re
 import sys
 import urllib.parse
 import urllib.request
+import urllib.error
 import uuid
 from typing import Any
 
@@ -81,6 +92,63 @@ DEFAULT_APP_ID = "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e"  # ClawCRM
 DEFAULT_KB_ID = "69ca75132970faa5ac6ce728"  # 项目管理知识库
 DEFAULT_PROJECT_WS = "69ca1fb1d128aadb0c749d49"  # 项目管理 工作表
 DEFAULT_WRITEBACK_CONTROLID = "69f956419f1956fc0e1867c3"  # AI评估 字段
+DEFAULT_V3_API_BASE = "https://api.mingdao.com"  # HAP V3 REST 默认 host，私有化部署改 env
+
+
+class HapApiClient:
+    """HAP V3 REST API 客户端（通道 B ——应用级 AppKey + Sign）。
+
+    endpoint: {base}/v3/open/<module>/<action>
+    auth: HTTP header `HAP-Appkey` + `HAP-Sign`（Appkey 和 Sign 都是预分发的静态字串，
+          无需客户端 HMAC。详见 hap-app-access SKILL.md §4）。
+    """
+
+    def __init__(self, base: str, appkey: str, sign: str):
+        self.base = base.rstrip("/")
+        self.appkey = appkey
+        self.sign = sign
+        self.diagnostics: list[str] = []
+
+    def _post(self, path: str, payload: dict) -> Any:
+        url = f"{self.base}/v3/open/{path.lstrip('/')}"
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "HAP-Appkey": self.appkey,
+                "HAP-Sign": self.sign,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read().decode("utf-8")
+        except urllib.error.HTTPError as e:  # type: ignore[attr-defined]
+            body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            self.diagnostics.append(f"[{path}] HTTP {e.code}: {body[:300]}")
+            raise
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            self.diagnostics.append(f"[{path}] non-JSON response: {raw[:200]}")
+            return raw
+        # V3 统一包装：{success, error_code, error_msg, data}
+        if isinstance(obj, dict):
+            if obj.get("success") is False or obj.get("error_code") not in (None, 0):
+                self.diagnostics.append(
+                    f"[{path}] error_code={obj.get('error_code')} msg={obj.get('error_msg')}"
+                )
+            return obj.get("data", obj)
+        return obj
+
+    def edit_row(self, worksheet_id: str, row_id: str, controls: list[dict]) -> Any:
+        """POST /v3/open/worksheet/editRow；字段 key 为 `controlId`（不同于 MCP 的 `id`）。"""
+        return self._post("worksheet/editRow", {
+            "worksheetId": worksheet_id,
+            "rowId": row_id,
+            "controls": controls,
+        })
 
 
 class MCPClient:
@@ -226,9 +294,30 @@ def main() -> int:
     p.add_argument("--writeback-worksheet", default=DEFAULT_PROJECT_WS,
                    help="项目工作表 ID，默认使用业务坐标里的固定值。")
     p.add_argument("--topk", type=int, default=8)
+    # --- v0.2.0 授权通道选择 ---
+    p.add_argument("--auth-channel", choices=["mcp", "appkey"],
+                   default=os.environ.get("HAP_AUTH_CHANNEL", "mcp"),
+                   help=("授权通道：mcp=Personal MCP 通道 A（默认）；"
+                         "appkey=应用级 AppKey+Sign 走 HAP V3 REST API 通道 B。"
+                         "可用 env HAP_AUTH_CHANNEL 覆盖。"))
+    p.add_argument("--appkey", default=os.environ.get("HAP_APP_KEY"),
+                   help="通道 B 凭据：Application AppKey（可用 env HAP_APP_KEY）。")
+    p.add_argument("--sign", default=os.environ.get("HAP_SIGN_KEY"),
+                   help="通道 B 凭据：Application Sign（可用 env HAP_SIGN_KEY）。")
+    p.add_argument("--api-base", default=os.environ.get("HAP_API_BASE", DEFAULT_V3_API_BASE),
+                   help=f"HAP V3 API base（默认 {DEFAULT_V3_API_BASE}）；私有化部署记得带 `/api` 后缀。")
     args = p.parse_args()
 
-    if not args.mcp_url:
+    if args.auth_channel == "appkey":
+        # 通道 B：凭据来自 --appkey/--sign 或 env；不需要 mcp_url / broker token。
+        if not args.appkey or not args.sign:
+            print(
+                "ERROR: --auth-channel=appkey 需要同时提供 --appkey/--sign 或 env HAP_APP_KEY/HAP_SIGN_KEY。",
+                file=sys.stderr,
+            )
+            return 2
+        diag(f"S1 auth=appkey api_base={args.api_base}")
+    elif not args.mcp_url:
         # 新模式（v2）：直读 hap-app-access Token Broker 中控服务落盘的 token JSON
         # 参见 hap-app-access SKILL.md §5.10。Broker 在 152/本地 都以 systemd/launchd 守护，
         # 这里仅做文件读 + 过期校验，无 subprocess 开销。
@@ -289,6 +378,44 @@ def main() -> int:
             print("ERROR: writeback-file 内容为空，拒绝写回", file=sys.stderr)
             return 2
 
+        ws_id = args.writeback_worksheet
+        control_id = args.writeback_controlid
+
+        # ---- 通道 B：AppKey+Sign 走 HAP V3 REST editRow ----
+        if args.auth_channel == "appkey":
+            api = HapApiClient(args.api_base, args.appkey, args.sign)
+            try:
+                ret = api.edit_row(ws_id, args.row_id, [
+                    {"controlId": control_id, "value": content},
+                ])
+            except Exception as e:
+                print(json.dumps({
+                    "ok": False,
+                    "authChannel": "appkey",
+                    "worksheetId": ws_id,
+                    "rowId": args.row_id,
+                    "controlId": control_id,
+                    "error": str(e),
+                    "diagnostics": api.diagnostics,
+                }, ensure_ascii=False, indent=2))
+                return 1
+            # V3 editRow 成功的 data 可能是 True / 1 / {rowId}；诊断 成功：
+            # 没有 diagnostics 并且 ret 不是显式 failure。
+            ok = (ret is True) or (ret == 1) or (isinstance(ret, dict) and ret.get("success") is not False)
+            print(json.dumps({
+                "ok": ok,
+                "authChannel": "appkey",
+                "worksheetId": ws_id,
+                "rowId": args.row_id,
+                "controlId": control_id,
+                "fieldName": args.writeback_name,
+                "charsWritten": len(content),
+                "response": ret,
+                "diagnostics": api.diagnostics,
+            }, ensure_ascii=False, indent=2))
+            return 0 if ok else 1
+        # ---- 通道 A：Personal MCP update_record ----
+
         cli = MCPClient(args.mcp_url)
         cli.rpc("initialize", {
             "protocolVersion": "2025-06-18",
@@ -299,9 +426,6 @@ def main() -> int:
             cli.rpc("notifications/initialized")
         except Exception:
             pass
-
-        ws_id = args.writeback_worksheet
-        control_id = args.writeback_controlid
 
         # 调用前校验：查 structure 对齐 controlId（仅作为 warning，不阻止写入）
         # 原因：AI评估 controlId 已硬编码在 SKILL.md 和本脚本中作为铁律坐标；

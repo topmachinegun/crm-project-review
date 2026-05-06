@@ -19,9 +19,44 @@ The user will typically supply **either** a project name **or** a rowId. Both pa
 
 ## 2. Prerequisites
 
+### 2.0 Auth Channels（授权通道，必读）
+
+ClawCRM 这个应用同时具备两种授权凭据，是返回到 `hap-app-access` 所描述的8格授权矩阵中的两维：
+
+| 通道 | 凭据类型 | 权限范围 | 适用场景 | 凭据来源 |
+|---|---|---|---|---|
+| **A. Personal MCP (OAuth Bearer)** | 个人级 Bearer Token | 登录用户自己的数据范围 | 有人值守 / 需要以具体销售负责人身份行动 / 快速验证 | `hap-oauth-mcp` 走 OAuth 登录的 broker（见 §2.1） |
+| **B. App-level AppKey + Sign** | `appkey` + `sign` + `token`（应用级） | **整个 ClawCRM 应用**的数据范围。不受个人 Token 有效期影响 | 无人值守自动化 / 服务端任务 / CI / 定时批评 | ClawCRM 管理后台 > 应用开发者设置，由 org admin 生成后分发 |
+
+**请按场景选通道**。本 skill 当前版本（v0.1.x）的脚本默认走通道 A；通道 B 的实际调用实现由 `hap-app-access` 统一参见。**无论哪条通道，本 skill 的业务坐标（appId / worksheetId / controlId / 知识库库 ID）均不变**。
+
+### 2.1 Channel A 凭据（Personal MCP）
+
+优先级：`--mcp-url` > env `HAP_MCP_URL` > broker 落盘文件（默认 `~/.local/share/hap-token-broker/tokens/claw-crm.json`）。三者都没时报错终止。**本 skill 不再自己刷 token**，刷新责任唯一属于 broker（守护进程 systemd 托管，详见 hap-app-access SKILL.md §5.10）。
+
+可选 env：`HAP_TOKEN_PROFILE`（默认 `claw-crm`）、`HAP_TOKEN_FILE`（显式覆盖文件路径）。调用前请确保 broker 已部署：`systemctl status hap-token-broker && hap-token status`。
+
+### 2.2 Channel B 凭据（AppKey + Sign）
+
+默认约定从以下环境变量读取（与 `hap-app-access` 保持一致），**绝不能**写回仓库：
+
+```bash
+export HAP_APP_KEY="<应用 AppKey>"       # 应用开发者后台直接复制，静态字串
+export HAP_SIGN_KEY="<应用 Sign>"       # 同上，预分发的静态字串；无需客户端 HMAC
+export HAP_API_BASE="https://api.mingdao.com"   # 默认。私有化部署带 `/api` 后缀，如 https://p-xxx.com/api
+export HAP_AUTH_CHANNEL="appkey"                # 可选；或调用时显式传 `--auth-channel appkey`
+```
+
+- **鉴权**：HTTP header `HAP-Appkey` + `HAP-Sign` 原样透传（而非 URL query）。
+- **Endpoint**：`{HAP_API_BASE}/v3/open/<module>/<action>`，如 `worksheet/editRow`。
+- **业务坐标不变**：appId / worksheetId / controlId 同 §2.3、§8；但要注意V3 API 请求体用 `worksheetId` / `rowId` / `controls` / `controlId`（而 MCP 请求混用 `worksheet_id` / `row_id` / `fields` / `id`）。
+- **适用场景**：需要在无个人登录下运行（定时任务 / 外部 agent / openclaw 后台调度）时，**优先选通道 B**，绕开个人 Token 刷新链路。
+- **本版本（v0.2.0）脚本覆盖范围**：`--auth-channel=appkey` 已端到端支持**写回模式**（`--writeback-file`）。评审数据采集（项目/日志 → 知识库检索）所需的 `knowledge_search` 在 V3 REST API 中 **没有等价物** （见 hap-app-access §8.14 的 fallback 分析），因此评审主流程仍以通道 A 为权威路径；计划在后续版本用“应用级 MCP URL”（`api.mingdao.com/mcp?HAP-Appkey=...&HAP-Sign=...`）做知识库检索的纯无个人凭据取代。
+
+### 2.3 业务坐标
+
 | Item | Default Value | How to obtain if missing |
 |---|---|---|
-| Personal MCP token | **优先级**：arg `--mcp-url` > env `HAP_MCP_URL` > 直读 **hap-app-access Token Broker 中控服务**落盘的 token JSON（默认 `~/.local/share/hap-token-broker/tokens/claw-crm.json`）。三者都没时报错终止。**本 skill 不再自己刷 token**，刷新责任唯一属于 broker（守护进程 systemd 托管，详见 hap-app-access SKILL.md §5.10）。可选 env：`HAP_TOKEN_PROFILE`（默认 `claw-crm`）、`HAP_TOKEN_FILE`（显式覆盖文件路径）。调用前请确保 broker 已部署：`systemctl status hap-token-broker && hap-token status`。 |
 | ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | n/a (hard-coded default) |
 | Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list(appId)` and re-select |
 | Project worksheet | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
@@ -55,6 +90,8 @@ See `learned_skill: Personal MCP 知识库发现+检索全链路调用指南` fo
 为什么这么严：项目评审要得出"阶段 / ICP / 风险 / 下一步 / SOP 偏离"五维结论，**所有这些结论的证据必须来自销售同事在项目日志里主动写下的记录**。日报、沟通里出现的项目名只是提及，不构成销售推进轨迹；用它们生成评审 = 把"别人顺口提了一句"当成"项目经理已经推进到这一步"，会直接污染决策。
 
 ## 4. End-to-End Workflow
+
+> **前提：已按 §2.0 选好授权通道**。下面的 S1–S10 检查单描述的是**通道 A（Personal MCP）**的流程，也是当前脚本评审主流程的唯一实现。如果仅做“写回 AI评估”（S9），可直接切换通道 B：脚本传 `--auth-channel appkey` 即可，底层走 V3 REST `worksheet/editRow`，具体见 §8.4。评审数据采集（S3–S8）有依赖 `knowledge_search`，暂依赖通道 A；后续版本计划用应用级 MCP URL 做纯无个人凭据版本。业务坐标和五维 Rubric 均不变。
 
 Copy this checklist and tick each step:
 
@@ -227,6 +264,30 @@ python3 "$SKILL_ROOT/scripts/review_project.py" \
 
 - 仅当 `update_record` 本身返回 `10001 controlId not found` 或类似错误 → 提示用户去 HAP UI 检查字段是否被误删；才**禁止**自动创建新字段。
 - 其他错误：原样透出，保留完整报告在对话中，**不**要截断、**不**要静默重试。
+
+### 8.4 若走通道 B（AppKey + Sign → V3 REST API）
+
+**本版本脚本已实现**：`--auth-channel=appkey` + `--writeback-file`。端到端例子：
+
+```bash
+export HAP_APP_KEY="<AppKey>"
+export HAP_SIGN_KEY="<Sign>"
+python3 "$SKILL_ROOT/scripts/review_project.py" \
+  --auth-channel appkey \
+  --row-id <ROW_ID> \
+  --writeback-file <报告.md>
+```
+
+底层调用为 `POST {HAP_API_BASE}/v3/open/worksheet/editRow`。请求体核心字段：
+
+- Header：`HAP-Appkey: <AppKey>`、`HAP-Sign: <Sign>`
+- `worksheetId` = `69ca1fb1d128aadb0c749d49`（同上，业务坐标不因通道而变）
+- `rowId` = 项目记录 rowId
+- `controls` = `[{"controlId": "69f956419f1956fc0e1867c3", "value": "<markdown_report>"}]`
+
+**误区提醒**：V3 API 的字段 key 是 `controlId`（而 MCP `update_record` 是 `id`）——两者 schema 差异正是 §3 铁律所指的“以 `tools/list` / API 文档为准”，**不要把 MCP 的 `fields.id` 约定搬到 V3 API 上**。
+
+**覆盖边界**：本版本`--auth-channel=appkey` **仅支持写回分支**。评审数据采集（拉项目/日志 + 知识库检索）仍强制走通道 A；主要原因是 `knowledge_search` RAG 在 V3 REST API 中没有等价端点（见 hap-app-access §8.14），降级为关键字筛选会丢失语义评分。后续版本计划用“应用级 MCP URL”（`api.mingdao.com/mcp?HAP-Appkey=...&HAP-Sign=...`）做评审主流程的纯无个人凭据版本。
 
 ## 9. Common Pitfalls
 
