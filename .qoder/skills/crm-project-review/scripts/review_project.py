@@ -303,13 +303,16 @@ def main() -> int:
         ws_id = args.writeback_worksheet
         control_id = args.writeback_controlid
 
-        # 调用前校验：查 structure 对齐 controlId（避免字段被删/重建）
+        # 调用前校验：查 structure 对齐 controlId（仅作为 warning，不阻止写入）
+        # 原因：AI评估 controlId 已硬编码在 SKILL.md 和本脚本中作为铁律坐标；
+        # structure 返回假阴性不命中（不同 env 字段排序/权限过滤挡掉该字段）
+        # 不应代表 “字段不存在”。最终以 update_record 本身的返回为准。
         struct = cli.call("get_worksheet_structure", {
             "worksheet_id": ws_id,
             "appId": args.app_id,
             "responseFormat": "json",
             "ai_description": ai_desc(
-                f"Worksheet: 项目管理. Verify AI评估 controlId before writeback."),
+                f"Worksheet: 项目管理. (Optional) verify AI评估 controlId before writeback."),
         })
         fields = (struct or {}).get("fields", []) if isinstance(struct, dict) else []
         match = None
@@ -321,18 +324,14 @@ def main() -> int:
                or al == args.writeback_alias:
                 match = f
                 break
-        if not match:
-            print(json.dumps({
-                "ok": False,
-                "reason": "AI评估 字段未在工作表结构中命中；请人工确认字段名/alias/controlId。",
-                "tried_controlId": control_id,
-                "tried_name": args.writeback_name,
-                "tried_alias": args.writeback_alias,
-                "diagnostics": cli.diagnostics,
-            }, ensure_ascii=False, indent=2))
-            return 1
+        struct_verified = match is not None
+        if not struct_verified:
+            diag(
+                f"AI评估 字段未在 structure 返回里命中（controlId={control_id}）；"
+                f"它可能是权限过滤或结构排序问题，仍会用硬编码 controlId 继续写入。"
+            )
 
-        resolved_cid = match.get("controlId") or match.get("id") or control_id
+        resolved_cid = (match.get("controlId") or match.get("id") or control_id) if match else control_id
 
         upd = cli.call("update_record", {
             "worksheet_id": ws_id,
@@ -356,7 +355,8 @@ def main() -> int:
             "worksheetId": ws_id,
             "rowId": args.row_id,
             "controlId": resolved_cid,
-            "fieldName": match.get("name"),
+            "fieldName": match.get("name") if match else args.writeback_name,
+            "structureVerified": struct_verified,
             "charsWritten": len(content),
             "response": upd,
             "diagnostics": cli.diagnostics,

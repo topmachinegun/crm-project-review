@@ -26,7 +26,7 @@ The user will typically supply **either** a project name **or** a rowId. Both pa
 | Knowledge base id | `69ca75132970faa5ac6ce728` ("项目管理知识库") | Call `get_app_knowledge_list(appId)` and re-select |
 | Project worksheet | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
 | Follow-up log source | 两种合法形态之一：**(a)** 项目管理工作表里 `controlName` 含「日志」的字段（主表直属字段或同表下的子表）；**(b)** 同 app 下独立工作表「项目日志」(默认 id `69ca1fc9d128aadb0c749edf`)，通过其 `project` 关联字段 `project[].sid == 主项目 rowId` 反向关联。**两者任一命中即可**，均为合法唯一数据源。**禁止**从 日报管理 / 沟通记录 / follow / log 等别的工作表或字段拼凑。详见 §3.1 数据源纪律。 |
-| Write-back field | default `ai_evaluation` (alias `AI评估`) | If absent, prompt the user; do NOT silently create it unless the user approves |
+| Write-back field | **controlId = `69f956419f1956fc0e1867c3`**（name `AI评估`，alias `ai_evaluation`，Type Text 多行。已确认存在于项目管理工作表） | 直接用此 controlId 写回，**不必**再调 `get_worksheet_structure` 去发现字段；若写回返回 `controlId not found`，才提示用户人工去 HAP UI 核查 |
 
 ## 3. Iron Rule (inherits hap-app-access v1.5 §7.1)
 
@@ -189,19 +189,44 @@ Every dimension must cite at least one `knowledgeHits[].chunkId` if the KB has r
 
 ## 8. Write-back Policy
 
-1. After the report is generated, locate the write-back field's `controlId` in the project worksheet structure (bundle's `project.structure.controls`). Match by `controlName == "AI评估"` or `alias == "ai_evaluation"`.
-2. **If the field exists** → call `update_record` with these exact keys (observed in `tools/list` schema):
-   ```json
-   {
-     "worksheet_id": "<project_worksheet_id>",
-     "row_id": "<project_row_id>",
-     "appId": "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e",
-     "fields": [{"controlId": "<ai_evaluation_controlId>", "value": "<markdown_report>"}],
-     "ai_description": "Worksheet: <name>, Record: <title>. Write AI review report into AI评估 field."
-   }
-   ```
-3. **If the field is absent** → do NOT auto-create. Show the user the manual build instruction (HAP UI → worksheet → add field of type 40 multi-line text named "AI评估" alias `ai_evaluation`) and keep the full report in chat.
-4. Never truncate the report silently on write-back failure — surface the error verbatim and keep the full report in the chat.
+### 8.0 Hard-coded 坐标（必读）
+
+**AI评估 字段的 controlId 已固定为 `69f956419f1956fc0e1867c3`**，直接写回即可。Agent **不要**：
+
+- 不要再调 `get_worksheet_structure` 去找“AI评估”字段；
+- 不要用 `controlName == "AI评估"` 或 `alias == "ai_evaluation"` 去模糊匹配后再取 controlId（OpenClaw 2026-04 实战里就卡在这一步找不到字段失败）；
+- 不要把读回的 bundle 里 `project.writeBackField` 为 null 解读为“字段不存在”——只说明脚本在该环境的 structure 返回里没能匹配到，**不代表字段已删除**。
+
+### 8.1 标准写回调用
+
+```json
+{
+  "worksheet_id": "69ca1fb1d128aadb0c749d49",
+  "row_id": "<project_row_id>",
+  "appId": "49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e",
+  "fields": [{"id": "69f956419f1956fc0e1867c3", "value": "<markdown_report>"}],
+  "ai_description": "Worksheet: 项目管理, Record: <title>. Write AI review report into AI评估 field."
+}
+```
+
+**注意**：fields 数组里字段的 key 是 `id`（不是 `controlId`）——`update_record` 的 schema 明确要求（见 §3 铁律 + `hap-app-access` 约定）。
+
+### 8.2 优先走脚本写回模式
+
+推荐直接调用脚本的 `--writeback-file` 开关，内部已硬编码 controlId，且对状态反馈结构化：
+
+```bash
+python3 "$SKILL_ROOT/scripts/review_project.py" \
+  --row-id <ROW_ID> \
+  --writeback-file <报告.md>
+```
+
+输出形如 `{ok, rowId, controlId, fieldName, charsWritten}`。
+
+### 8.3 错误处理
+
+- 仅当 `update_record` 本身返回 `10001 controlId not found` 或类似错误 → 提示用户去 HAP UI 检查字段是否被误删；才**禁止**自动创建新字段。
+- 其他错误：原样透出，保留完整报告在对话中，**不**要截断、**不**要静默重试。
 
 ## 9. Common Pitfalls
 
