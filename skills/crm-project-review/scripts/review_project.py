@@ -120,19 +120,28 @@ def _run_hap_access(cmd: list[str]) -> dict:
         raise HapCallError(f"hap-access 返回非 JSON：{proc.stdout[:200]!r} ({e})")
 
 
-def hap_call(profile: str, tool: str, args: dict, *, bin_path: str | None = None) -> Any:
+def hap_call(profile: str, tool: str, args: dict, *, bin_path: str | None = None, app: str | None = None) -> Any:
     """调用 `hap-access call`，返回剥壳后的 data 层；失败抛 HapCallError。
 
     业务 skill 不再传 appId / ai_description / appkey / sign / mcp_url——
-    这些由 hap-access 按 profile 自动注入。
+    这些由 hap-access 按 profile 或 --app 自动注入。
+    v1.7+: 若传 app 参数，优先使用 --app（从统一配置解析），忽略 profile。
     """
     bin_path = bin_path or resolve_hap_access_bin()
-    cmd = [
-        bin_path, "call",
-        "--profile", profile,
-        "--tool", tool,
-        "--args", json.dumps(args, ensure_ascii=False),
-    ]
+    if app:
+        cmd = [
+            bin_path, "call",
+            "--app", app,
+            "--tool", tool,
+            "--args", json.dumps(args, ensure_ascii=False),
+        ]
+    else:
+        cmd = [
+            bin_path, "call",
+            "--profile", profile,
+            "--tool", tool,
+            "--args", json.dumps(args, ensure_ascii=False),
+        ]
     payload = _run_hap_access(cmd)
     # 合并底层诊断
     for d in payload.get("diagnostics") or []:
@@ -144,10 +153,13 @@ def hap_call(profile: str, tool: str, args: dict, *, bin_path: str | None = None
     return payload.get("data")
 
 
-def hap_list_tools(profile: str, *, bin_path: str | None = None) -> list[str]:
+def hap_list_tools(profile: str, *, bin_path: str | None = None, app: str | None = None) -> list[str]:
     """调用 `hap-access list-tools`，返回工具名列表。"""
     bin_path = bin_path or resolve_hap_access_bin()
-    cmd = [bin_path, "list-tools", "--profile", profile]
+    if app:
+        cmd = [bin_path, "list-tools", "--app", app]
+    else:
+        cmd = [bin_path, "list-tools", "--profile", profile]
     payload = _run_hap_access(cmd)
     for d in payload.get("diagnostics") or []:
         _DIAGNOSTICS.append(f"[list-tools] {d}")
