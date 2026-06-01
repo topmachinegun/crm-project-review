@@ -26,6 +26,7 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 | 项目 | 默认值 | 缺失时如何获取 |
 |---|---|---|
 | Token | 由外部进程管理刷新。本 skill 通过 `token_reader.get_mcp_url("claw-crm")` 读取 token 文件。 | token 文件不存在或过期时联系管理员刷新 |
+| **App MCP 回退 URL** | **🔴 必填**。Personal MCP 鉴权失败（600100）或 knowledge_search 500 时自动切换。格式: `https://api.mingdao.com/mcp?HAP-Appkey=<KEY>&HAP-Sign=<SIGN>`。通过 `--fallback-mcp-url` 或 `HAP_FALLBACK_MCP_URL` 环境变量传入。 | 未设置则无法回退，Personal MCP 故障时脚本会报错退出 |
 | ClawCRM appId | `49392ae2-6aa0-4d69-b5e7-57d4fe3fc98e` | 无（硬编码默认值） |
 | 知识库 ID | `69ca75132970faa5ac6ce728`（"项目管理知识库"） | 调用 `get_app_knowledge_list(appId)` 重新选择 |
 | 项目工作表 | `69ca1fb1d128aadb0c749d49`（项目管理） | 固定锚点；如被 org 改名，`get_app_worksheets_list` 里选 name 含「项目管理」的那张，**不得**选「日报管理」「沟通」等别的表 |
@@ -101,16 +102,22 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 ```bash
 # 脚本自动从 token 文件读取 token，无需 --mcp-url
 python3 skills/crm_project_review/src/review_project.py \
-  --project "XYZ有限公司"
+  --project "XYZ有限公司" \
+  --fallback-mcp-url "https://api.mingdao.com/mcp?HAP-Appkey=<KEY>&HAP-Sign=<SIGN>"
 
 # 或指定 rowId
 python3 skills/crm_project_review/src/review_project.py \
-  --row-id <ROW_ID>
+  --row-id <ROW_ID> \
+  --fallback-mcp-url "https://api.mingdao.com/mcp?HAP-Appkey=<KEY>&HAP-Sign=<SIGN>"
 
 # 写回模式
 python3 skills/crm_project_review/src/review_project.py \
   --row-id <ROW_ID> \
-  --writeback-file /tmp/report.md
+  --writeback-file /tmp/report.md \
+  --fallback-mcp-url "https://api.mingdao.com/mcp?HAP-Appkey=<KEY>&HAP-Sign=<SIGN>"
+
+# 或提前 export 环境变量（推荐，避免每次传参）
+# export HAP_FALLBACK_MCP_URL="https://api.mingdao.com/mcp?HAP-Appkey=<KEY>&HAP-Sign=<SIGN>"
 ```
 
 脚本输出单个 JSON 文档，包含 `{project, knowledgeHits, tools}`。Agent 据此按 §5 评分标准撰写报告。
@@ -205,6 +212,9 @@ python3 skills/crm_project_review/src/review_project.py \
 | KB 命中结果跑题 | 检索词太直白 | 提取动作动词 + 行业术语 |
 | `update_record` 静默无效果 | `controlId` 错误 | 重新执行 `get_worksheet_structure` |
 | Token 过期 | 外部刷新进程未运行 | 联系管理员刷新 token |
+| `knowledge_search` 返回 500 | Personal MCP @ api2.mingdao.com 知识库服务不稳定 | 配置 `--fallback-mcp-url` 或 `HAP_FALLBACK_MCP_URL`，脚本自动用 App MCP 回退 |
+| Personal MCP 鉴权 600100 | Bearer token 在 api2 域名下失效 | 同上，`_create_mcp_client()` 自动切换域名链: api2→api→App MCP |
+| 运行时提示「所有 MCP 连接均失败」 | Broker token 600100 且未设置 `--fallback-mcp-url` | 设置 `HAP_FALLBACK_MCP_URL` 或在命令行传 `--fallback-mcp-url` |
 
 ## 10. Related
 
@@ -214,8 +224,13 @@ python3 skills/crm_project_review/src/review_project.py \
 
 ---
 
-**技能版本**：v3.2.0
+**技能版本**：v3.3.0
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.3.0 变更**：
+- 新增 `--fallback-mcp-url` / `HAP_FALLBACK_MCP_URL` 配置，支持 Personal MCP 600100 和 knowledge_search 500 时自动回退到 App MCP
+- 新增 `--row-id` 模式下从 record 字段提取搜索词，解决 record_title 为空时日志 fallback 失败
+- 兼容 hap_app_access v2.1+ 的 `list_tools()` 返回类型变更
 
 **v3.2.0 变更**：
 - 评审写回时自动勾选「是否需要AI评估」并更新「最后评估时间」
