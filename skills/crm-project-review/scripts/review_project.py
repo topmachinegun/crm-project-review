@@ -106,6 +106,69 @@ def ai_desc(s: str) -> str:
     return s[:180]  # 防止超长
 
 
+# Personal MCP 鉴权失败 error_code
+_AUTH_FAIL_CODES = frozenset({"600100", "600101"})
+
+
+def _is_auth_error(diagnostics: list[str]) -> bool:
+    """检查 diagnostics 中是否包含鉴权失败的错误码。"""
+    for d in diagnostics:
+        for code in _AUTH_FAIL_CODES:
+            if f"error_code={code}" in d:
+                return True
+    return False
+
+
+def _create_mcp_client(args) -> MCPClient:
+    """创建 MCP 客户端，支持自动回退。
+
+    回退策略：
+    1. 主 URL（--mcp-url / Broker token）→ personal_mcp
+    2. 若鉴权失败（600100），尝试域名切换：api2.mingdao.com → api.mingdao.com
+    3. 仍失败则使用 --fallback-mcp-url（如 App MCP）
+    4. 仍失败则尝试 HAP_FALLBACK_MCP_URL 环境变量
+    """
+    # 收集候选 URL
+    candidates: list[tuple[str, str]] = []
+
+    # 主 URL
+    if args.mcp_url:
+        candidates.append((args.mcp_url, "personal_mcp"))
+
+    # 自动域名回退：api2 → api（同一 Bearer token）
+    if args.mcp_url and "api2.mingdao.com" in args.mcp_url:
+        fallback_domain = args.mcp_url.replace("api2.mingdao.com", "api.mingdao.com")
+        candidates.append((fallback_domain, "personal_mcp"))
+
+    # 显式 fallback URL
+    if args.fallback_mcp_url:
+        mode = "app_mcp" if "HAP-Appkey" in args.fallback_mcp_url else "personal_mcp"
+        candidates.append((args.fallback_mcp_url, mode))
+
+    last_error: str | None = None
+    for url, mode in candidates:
+        try:
+            cli = MCPClient(url, mode=mode)
+            cli.ensure_initialized()
+            # 连通性测试
+            test = cli.call("get_app_worksheets_list", {"appId": args.app_id})
+            if _is_auth_error(cli.diagnostics):
+                domain_hint = url.split("?")[0].split("//")[-1].split("/")[0]
+                diag(f"MCP auth fail: mode={mode} domain={domain_hint} → 尝试下一个")
+                continue
+            diag(f"MCP connected: mode={mode} domain={url.split('?')[0].split('//')[-1].split('/')[0]}")
+            return cli
+        except Exception as e:
+            diag(f"MCP init fail (mode={mode}): {e}")
+            last_error = str(e)
+            continue
+
+    msg = f"所有 MCP 连接均失败。已尝试 {len(candidates)} 种方式。"
+    if last_error:
+        msg += f" 最后错误: {last_error}"
+    raise RuntimeError(msg)
+
+
 def extract_logs_from_record(record: Any, struct_controls: list[dict]) -> tuple[list[dict], str | None]:
     """仅从项目主表记录里提取字段名含「日志」的字段，返回 (日志列表, 字段名)。
 
@@ -193,6 +256,9 @@ def main() -> int:
     p.add_argument("--writeback-worksheet", default=DEFAULT_PROJECT_WS,
                    help="项目工作表 ID，默认使用业务坐标里的固定值。")
     p.add_argument("--topk", type=int, default=8)
+    p.add_argument("--fallback-mcp-url", default=os.environ.get("HAP_FALLBACK_MCP_URL"),
+                   help="备选 MCP URL（如 App MCP 的 Appkey+Sign URL）。"
+                        "Personal MCP 鉴权失败（600100）时自动切换。")
     args = p.parse_args()
 
     if not args.mcp_url:
@@ -224,7 +290,7 @@ def main() -> int:
             print("ERROR: writeback-file 内容为空，拒绝写回", file=sys.stderr)
             return 2
 
-        cli = MCPClient(args.mcp_url, mode="personal_mcp")
+        cli = _create_mcp_client(args)
         cli.ensure_initialized()
 
         ws_id = args.writeback_worksheet
@@ -300,7 +366,7 @@ def main() -> int:
         print("ERROR: 必须提供 --project 或 --row-id", file=sys.stderr)
         return 2
 
-    cli = MCPClient(args.mcp_url, mode="personal_mcp")
+    cli = _create_mcp_client(args)
 
     # S2 initialize + tools/list
     cli.ensure_initialized()
