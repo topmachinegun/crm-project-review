@@ -608,6 +608,19 @@ def main() -> int:
                 if t and t not in seen_t:
                     seen_t.add(t)
                     ordered.append(t)
+            # --row-id 场景：record_title 为空且无 --project 时，从记录字段提取项目名
+            if not ordered and isinstance(record, dict):
+                for key_hint in ("project_name", "name", "title"):
+                    for k, v in record.items():
+                        if k == key_hint or key_hint in str(k).lower():
+                            val = str(v).strip()
+                            if val and val not in seen_t:
+                                seen_t.add(val)
+                                ordered.append(val)
+                                diag(f"S6 fallback: extracted search term '{val}' from record field {k}")
+                                break
+                    if ordered:
+                        break
             candidates: list[dict] = []
             seen_ids: set[str] = set()
             for tok in ordered:
