@@ -305,7 +305,11 @@ def main() -> int:
     # S2 initialize + tools/list
     cli.ensure_initialized()
     tl_raw = cli.list_tools()
-    tools = {t["name"]: t.get("inputSchema", {}) for t in tl_raw}
+    # 兼容 hap_app_access v2.1+: list_tools() 可能返回 list[str] 或 list[dict]
+    if tl_raw and isinstance(tl_raw[0], str):
+        tools = {t: {} for t in tl_raw}
+    else:
+        tools = {t["name"]: t.get("inputSchema", {}) for t in tl_raw}
 
     # S4 发现项目工作表
     ws_list = cli.call("get_app_worksheets_list", {"appId": args.app_id})
