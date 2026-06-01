@@ -697,6 +697,7 @@ def main() -> int:
     queries = build_queries(logs, record)
     all_hits: list[dict] = []
     seen_chunks: set[str] = set()
+    kb_failed_queries: list[str] = []
     for qname, qtext in queries.items():
         r = cli.call("knowledge_search", {
             "appId": args.app_id,
@@ -712,12 +713,55 @@ def main() -> int:
             for it in r:
                 if isinstance(it, dict):
                     chunks += it.get("chunks") or []
+        # 检测知识库搜索是否真正失败（500 或 空结果 + 异常诊断）
+        kb_ok = bool(chunks)
+        if not kb_ok:
+            for d in cli.diagnostics:
+                if "knowledge_search" in d and ("500" in d or "error_code=5" in d):
+                    kb_ok = False
+                    break
+                if "knowledge_search" in d and "error_code=2" in d:
+                    # error_code=2 但可能有默认结果
+                    pass
+            if not kb_ok:
+                kb_failed_queries.append(qname)
         for h in chunks:
             cid = h.get("chunkId")
             if cid and cid not in seen_chunks:
                 seen_chunks.add(cid)
                 h["_query"] = qname
                 all_hits.append(h)
+    # 知识库主连接失败时，用 fallback MCP URL 重试
+    if kb_failed_queries and args.fallback_mcp_url:
+        diag(f"S7 kb-fallback: {len(kb_failed_queries)} queries failed on primary MCP, retrying with fallback")
+        try:
+            kb_cli = MCPClient(args.fallback_mcp_url, mode="app_mcp")
+            kb_cli.ensure_initialized()
+            for qname in kb_failed_queries:
+                qtext = queries[qname]
+                r2 = kb_cli.call("knowledge_search", {
+                    "appId": args.app_id,
+                    "knowledgeIds": [args.knowledge_id],
+                    "query": qtext,
+                    "searchMode": "hybrid",
+                    "topK": args.topk,
+                })
+                chunks2: list[dict] = []
+                if isinstance(r2, dict):
+                    chunks2 = r2.get("chunks") or []
+                elif isinstance(r2, list):
+                    for it in r2:
+                        if isinstance(it, dict):
+                            chunks2 += it.get("chunks") or []
+                for h in chunks2:
+                    cid = h.get("chunkId")
+                    if cid and cid not in seen_chunks:
+                        seen_chunks.add(cid)
+                        h["_query"] = qname
+                        all_hits.append(h)
+            diag(f"S7 kb-fallback: added {sum(1 for h in all_hits if h.get('_query') in kb_failed_queries)} hits for failed queries")
+        except Exception as e:
+            diag(f"S7 kb-fallback failed: {e}")
     # 按 score 排序留前 topk*2
     all_hits.sort(key=lambda x: x.get("score", 0), reverse=True)
     all_hits = all_hits[: args.topk * 2]
