@@ -148,6 +148,8 @@ python3 skills/crm_project_review/src/review_project.py \
 
 ## 6. 知识库检索策略
 
+> **知识库性质**：项目管理知识库（ID: `69ca75132970faa5ac6ce728`）由多条独立的文档/记录组成（销售流程 SOP、ICP 标准、风险清单、报价策略等），内容会持续增长和更新。每次 `knowledge_search` 结果取决于语义匹配度，同一查询不同时间返回结果可能不同。
+
 1. 从日志中提取：客户行业、最近动作动词、未解决问题、阻塞点、数字信息
 2. 构造 3 路并行检索：`query_stage`、`query_risks`、`query_icp`
 3. 每次检索：`searchMode=hybrid`、`topK=5~10`、`knowledgeIds=[默认 KB]`
