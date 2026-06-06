@@ -119,26 +119,31 @@ python3 skills/crm_project_review/src/review_project.py \
 
 ### 5.1 项目阶段 (Stage)
 - **锚点**：KB 中的销售流程阶段（初次接触 / 转交伙伴 / 展示 / 辅助选型 / 消除疑虑 / 报价 / 签约 / 交付 / 顺藤摸瓜）
-- **输出**：`{stage, evidence, confidence: 高/中/低}`
+- **输出**：`{stage, evidence, confidence: 高/中/低, chunk_refs: [{chunkId, summary}...]}`
+- **报告渲染**：在「依据」段落后另起一行，内联标注 `> KB: [chunkId前8位] 摘要（≤15字）`
 
 ### 5.2 ICP 匹配度 (ICP Fit)
 - **锚点**：KB 中的 ICP 标准（员工数 ≥ 50 / 老板重视 / 有具体数字化问题 / IT 部门参与 / 行业契合 / 团队活力 / 品牌标杆）
-- **输出**：`{score: 0-100, matched_criteria: [...], missing_criteria: [...]}`
+- **输出**：`{score: 0-100, matched_criteria: [...], missing_criteria: [...], chunk_refs: [{chunkId, summary}...]}`
+- **报告渲染**：在「已满足/待补强」列表后另起一行，内联标注 `> KB: [chunkId前8位] 摘要`
 
 ### 5.3 风险点 (Risks)
 - **锚点**：日志中的停滞信号（长时间无互动、决策链不清、预算缩减、竞品介入、POC 拖延、合同条款争议）
-- **输出**：list of `{risk, severity: 高/中/低, supporting_log_snippet}`
+- **输出**：list of `{risk, severity: 高/中/低, supporting_log_snippet, chunk_ref: {chunkId, summary}}`
+- **报告渲染**：表格新增「KB 依据」列，每行列内标注 `[chunkId前8位] 摘要`
 
 ### 5.4 下一步动作 (Next Actions)
 - **锚点**：KB 中当前阶段的 SOP 动作 + 检测到的风险
-- **输出**：有序列表 `{action, deadline_hint, kb_reference_chunkId}`
+- **输出**：有序列表 `{action, deadline_hint, chunk_ref: {chunkId, summary}}`
 - **负责人**：所有动作的负责人默认为项目本身的负责人，不需要在报告中建议具体责任人
+- **报告渲染**：每条动作下方缩进一行，内联标注 `> KB: [chunkId前8位] 摘要`
 
 ### 5.5 SOP 偏离度 (SOP Deviation)
 - **锚点**：日志中的已执行动作 vs KB 中该阶段的检查清单
-- **输出**：`{expected_actions: [...], performed_actions: [...], missed: [...], deviation_score: 0-100}`
+- **输出**：`{expected_actions: [...], performed_actions: [...], missed: [{action, chunk_ref: {chunkId, summary}}...], deviation_score: 0-100}`
+- **报告渲染**：每条遗漏动作后内联标注 `> KB: [chunkId前8位] 摘要`
 
-每个维度至少引用一个 `knowledgeHits[].chunkId`。
+每个维度至少在判断或动作后内联一个 `knowledgeHits[].chunkId`（格式见 §7）。
 
 ## 6. 知识库检索策略
 
@@ -148,6 +153,10 @@ python3 skills/crm_project_review/src/review_project.py \
 4. 按 `chunkId` 去重；按 score 保留全局前 10 条
 
 ## 7. 报告模板
+
+每个维度的判断或动作后均需**内联标注**所依据的 KB chunk，格式为：
+`> KB: [chunkId 前8位] 摘要（≤15字）`
+不单独输出末尾的 chunk 索引表。
 
 ```markdown
 # ClawCRM 项目评审：{{项目名}}
@@ -160,30 +169,39 @@ python3 skills/crm_project_review/src/review_project.py \
 ## 1. 项目阶段
 **判定**：{{stage}}（置信度 {{confidence}}）
 **依据**：{{evidence}}
-**KB 引用**：chunk `{{chunkId}}`
+> KB: [{{chunkId_short}}] {{chunk_summary}}
 
 ## 2. ICP 匹配度
 **得分**：{{score}}/100
 - ✅ 已满足：{{matched_criteria}}
 - ⚠️ 待补强：{{missing_criteria}}
+> KB: [{{chunkId_short}}] {{chunk_summary}}
 
 ## 3. 风险点
-| 风险 | 严重度 | 日志证据 |
-|---|---|---|
-| ... | 高/中/低 | "..." |
+| 风险 | 严重度 | 日志证据 | KB 依据 |
+|---|---|---|---|
+| ... | 高/中/低 | "..." | [{{chunkId_short}}] {{chunk_summary}} |
 
 ## 4. 下一步动作（按优先级）
 1. {{action}} — 建议时限：{{deadline_hint}}
+   > KB: [{{chunkId_short}}] {{chunk_summary}}
 
 ## 5. SOP 偏离度
 - 应做动作清单（KB）：{{expected_actions}}
 - 已做动作清单（日志）：{{performed_actions}}
-- 遗漏动作：{{missed}}
+- 遗漏动作：
+  - ❌ {{missed_action}} > KB: [{{chunkId_short}}] {{chunk_summary}}
 - 偏离度：{{deviation_score}}/100
 
 ---
 *生成时间：{{ts}}  |  模型引用知识库 {{knowledgeId}}*
 ```
+
+**内联引用规则**：
+- `chunkId_short` = chunkId 的前 8 位十六进制字符
+- `chunk_summary` ≤ 15 字，直接提炼 chunk 摘要中的核心概念，不得照抄全文
+- 每个维度至少内联一个 chunk；若同一判断有多个 chunk 支撑，逐行列出
+- **不输出末尾的 chunk 索引表**
 
 ## 8. 写回策略
 
@@ -215,11 +233,13 @@ python3 skills/crm_project_review/src/review_project.py \
 
 ---
 
-**技能版本**：v3.3.0
+**技能版本**：v3.4.0
 **适用范围**：明道云 HAP（SaaS）
 
-**v3.3.0 变更**：
-- 下一步动作不再建议具体责任人，所有行动负责人默认使用项目本身的负责人
+**v3.4.0 变更**：
+- 报告模板改为内联 KB chunk 引用（每个判断/动作后标注 `[chunkId前8位] 摘要`），移除末尾 chunk 索引表
+- §5 各维度输出规范新增 `chunk_refs` / `chunk_ref` 字段
+- §7 报告模板表格新增「KB 依据」列（风险点）
 
 **v3.2.0 变更**：
 - 评审写回时自动勾选「是否需要AI评估」并更新「最后评估时间」
