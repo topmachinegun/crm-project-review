@@ -51,6 +51,7 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 - `get_app_list` 用 `org_id`（snake_case）；`get_app_knowledge_list` / `knowledge_search` 用 `appId`（camelCase）。
 - **所有涉及记录的工具都必须传 `ai_description` 字符串**。缺少则返回 `10001 Http Headers verification failed`。
 - 错误码 `10001` 几乎总是意味着**参数名写错或缺少 `ai_description`**，而非 token/header 问题。
+- **MCP filter 格式 ≠ REST API filter 格式**。`get_record_list` 的 `filter` 要求 root 必须是 `group`，condition 嵌套在 `children` 里：`{"type":"group","logic":"AND","children":[{"type":"condition","field":"...","operator":"eq","value":"1"}]}`。扁平的 `{controlId, operator, value}` REST 格式会被 **静默忽略**（不报错不报错，返回全表未过滤数据）。
 
 ### 3.1 数据源纪律（Single Source of Truth）
 
@@ -226,6 +227,7 @@ python3 skills/crm-project-review/scripts/review_project.py \
 | KB 命中结果跑题 | 检索词太直白 | 提取动作动词 + 行业术语 |
 | `update_record` 静默无效果 | `controlId` 错误 | 重新执行 `get_worksheet_structure` |
 | Token 过期 | 外部刷新进程未运行 | 联系管理员刷新 token |
+| `get_record_list` 带 filter 返回全表（未过滤） | 用了 REST API 扁平格式 `{controlId, operator, value}`，MCP 要求 `{type:"group", children:[{type:"condition",...}]}` 嵌套结构。HAP 对未知 filter 格式**静默忽略**不报错 | 始终从 `tools/list` → `inputSchema` 确认 filter 结构，root 必须是 `group` |
 
 ## 10. Related
 
@@ -235,8 +237,11 @@ python3 skills/crm-project-review/scripts/review_project.py \
 
 ---
 
-**技能版本**：v3.4.0
+**技能版本**：v3.4.1
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.4.1 变更**：
+- §3 铁律 + §9 常见陷阱新增：MCP `get_record_list` filter 必须使用 `group → condition` 嵌套结构，扁平 REST API 格式会被静默忽略（不报错不过滤，返回全表）
 
 **v3.4.0 变更**：
 - 报告模板改为内联 KB chunk 引用（每个判断/动作后标注 `[chunkId前8位] 摘要`），移除末尾 chunk 索引表
