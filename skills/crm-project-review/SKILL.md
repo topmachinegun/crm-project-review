@@ -97,6 +97,64 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 
 正确做法：**原样返回错误，请用户补数据，结束会话**。
 
+### 4.2 批量定时评审（Cron 模式）
+
+> 以下流程固化筛选逻辑，智能体**不得自行编造**替代方案。
+
+**字段速查**：
+
+| 用途 | controlId | 类型 |
+|------|-----------|------|
+| 项目管理表 | `69ca1fb1d128aadb0c749d49` | worksheet |
+| 是否需要AI评估 (needAI) | `6a0a8c0dbf6da4a6790db190` | Checkbox |
+| 最后评估时间 (lastEval) | `6a0a8c2a314b8166a324f6aa` | DateTime |
+| AI评估 (aiEval) | `69f956419f1956fc0e1867c3` | Text |
+| 项目日志表 | `69ca1fc9d128aadb0c749edf` | worksheet |
+| 日志关联项目 (belongsto) | `69ca205fbf12c183aec577f1` | 关联字段 |
+| 日志日期 (log_date) | `69ce50856b2525025fe6ce6b` | Date |
+
+**铁律**：
+- needAI 字段**只能由人工操作**，Cron 不得修改
+- 无候选项目 → 静默结束，不发通知
+- MCP/Hard Stop 异常 → 静默跳过该项目
+- 任何一步的 `get_record_list` filter 必须使用 `{type:"group", children:[{type:"condition",...}]}` 格式（见 §3 铁律）
+- **日期比较前必须归一化**：log_date 是 Date (`YYYY-MM-DD`)，lastEval 是 DateTime (`YYYY-MM-DD HH:mm:ss`)，比较时必须统一截取 `[:10]`
+
+**步骤**：
+
+```
+- [ ] C1 查询 needAI=1 候选
+       get_record_list(worksheet_id=69ca1fb1d128aadb0c749d49)
+       filter: {type:"group", logic:"AND", children:[
+         {type:"condition", field:"6a0a8c0dbf6da4a6790db190", operator:"eq", value:"1"}
+       ]}
+       ⚠️ 逐条用 get_record_details(row_id) 复核 needAI 真实值
+
+- [ ] C2 安全门
+       返回记录数 > 50 → 立即中止，发企微通知 WenJing：
+       「needAI 过滤疑似失效，返回 {N} 条，已中止，请人工检查。」
+       不得继续。
+
+- [ ] C3 逐项目过滤（对每条 confirmed-needAI=1 的记录）
+       a) 用 get_record_details(row_id) 取 lastEval 真实值
+       b) lastEval 有值 → 查日志表(69ca1fc9d128aadb0c749edf)
+          filter: belongsto=rowId AND log_date[:10] >= lastEval[:10]
+          有结果 → 进入评审
+       c) lastEval 为空 → 查日志表 belongsto=rowId，total>0 → 进入评审
+       d) 否则跳过
+
+- [ ] C4 预检通知
+       企微消息发给 WenJing，列出候选项目及过滤判断。
+       无候选则静默结束。
+
+- [ ] C5 逐项目评审
+       对每个候选，执行 §4 单项目流程（S1-S10），或运行：
+       python3 /root/.openclaw/skills/crm_project_review/scripts/review_project.py --project "<名称>" --topk 10
+
+- [ ] C6 完成通知
+       企微发给 WenJing，列出每项目的评审状态。
+```
+
 ### 便捷方式：运行辅助脚本
 
 ```bash
@@ -238,8 +296,11 @@ python3 skills/crm-project-review/scripts/review_project.py \
 
 ---
 
-**技能版本**：v3.4.2
+**技能版本**：v3.5.0
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.5.0 变更**：
+- 新增 §4.2 批量定时评审（Cron 模式），固化项目筛选范围控制：needAI=1 候选查询 → 50 条安全门 → 逐项目日志时间比对 → 预检通知 → 逐项目评审 → 完成通知
 
 **v3.4.2 变更**：
 - §9 常见陷阱新增：Date vs DateTime 字符串比较假阴性（`"2026-06-05" < "2026-06-05 14:15:00"`），比较前必须 `[:10]` 或 `strptime` 归一化
