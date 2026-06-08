@@ -52,6 +52,7 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 - **所有涉及记录的工具都必须传 `ai_description` 字符串**。缺少则返回 `10001 Http Headers verification failed`。
 - 错误码 `10001` 几乎总是意味着**参数名写错或缺少 `ai_description`**，而非 token/header 问题。
 - **MCP filter 格式 ≠ REST API filter 格式**。`get_record_list` 的 `filter` 要求 root 必须是 `group`，condition 嵌套在 `children` 里：`{"type":"group","logic":"AND","children":[{"type":"condition","field":"...","operator":"eq","value":"1"}]}`。扁平的 `{controlId, operator, value}` REST 格式会被 **静默忽略**（不报错不报错，返回全表未过滤数据）。
+- **`get_record_list` 返回的 `_id` 是别名，不是真 rowId**。`_id` 是 24 位 hex 内部标识，不能直接传给 `get_record_details`（会报 430002）。真 rowId 在 search 模式返回结果的 `rowId` 字段中。
 
 ### 3.1 数据源纪律（Single Source of Truth）
 
@@ -287,6 +288,9 @@ python3 skills/crm-project-review/scripts/review_project.py \
 | Token 过期 | 外部刷新进程未运行 | 联系管理员刷新 token |
 | `get_record_list` 带 filter 返回全表（未过滤） | 用了 REST API 扁平格式 `{controlId, operator, value}`，MCP 要求 `{type:"group", children:[{type:"condition",...}]}` 嵌套结构。HAP 对未知 filter 格式**静默忽略**不报错 | 始终从 `tools/list` → `inputSchema` 确认 filter 结构，root 必须是 `group` |
 | 日志时间比较假阴性（有当天新日志被判为「无新日志」） | HAP 中 `跟进日志` 字段是 Date 类型（`YYYY-MM-DD`），`最后评估时间` 是 DateTime 类型（`YYYY-MM-DD HH:mm:ss`）。字符串直接比较：`"2026-06-05" < "2026-06-05 14:15:00"`（前缀规则）→ 同一天的日志被判定为更早 | 比较前统一截取前 10 位 `[:10]`，或用 `datetime.strptime(s[:10], "%Y-%m-%d")` 解析后再比较 |
+| 大量 `exec` 调用拖慢评审（60+ 工具调用） | Agent 用 `exec` 跑 shell/Python 直连 HAP，而非通过 MCP 工具 | **严格使用 MCP 工具**（`get_record_list`、`knowledge_search`、`update_record` 等），禁止 `exec`/`curl`/`requests`/`urllib` 拼 HTTP 直连 |
+| `get_record_details` 报 430002（rowId 无效） | 传入了 `get_record_list` 返回的 `_id`（24位hex别名），真 rowId 在 search 模式的 `rowId` 字段中 | 始终从 search 结果取 `rowId` 字段（UUID），不用 `_id` |
+| `knowledge_search` 报 600302「集成应用不可用」 | Personal MCP (Bearer token) 下 KB 集成不可用，需 Fallback 到 App MCP (Appkey+Sign) | 已知行为，自动切换到 App MCP 重试，无需告警或中断 |
 
 ## 10. Related
 
@@ -296,8 +300,12 @@ python3 skills/crm-project-review/scripts/review_project.py \
 
 ---
 
-**技能版本**：v3.5.0
+**技能版本**：v3.5.1
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.5.1 变更**：
+- §3 铁律新增：`get_record_list` 的 `_id` 是别名，真 rowId 在 `rowId` 字段
+- §9 常见陷阱新增 3 条：禁止 exec/curl 直连 HAP、rowId alias 导致 430002、knowledge_search 600302 fallback
 
 **v3.5.0 变更**：
 - 新增 §4.2 批量定时评审（Cron 模式），固化项目筛选范围控制：needAI=1 候选查询 → 50 条安全门 → 逐项目日志时间比对 → 预检通知 → 逐项目评审 → 完成通知
