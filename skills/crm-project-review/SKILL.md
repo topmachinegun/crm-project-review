@@ -119,7 +119,7 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 - 无候选项目 → 静默结束，不发通知
 - MCP/Hard Stop 异常 → 静默跳过该项目
 - 任何一步的 `get_record_list` filter 必须使用 `{type:"group", children:[{type:"condition",...}]}` 格式（见 §3 铁律）
-- **日期比较前必须归一化**：log_date 是 Date (`YYYY-MM-DD`)，lastEval 是 DateTime (`YYYY-MM-DD HH:mm:ss`)，比较时必须统一截取 `[:10]`
+- **日期比较前必须归一化，且严格晚于**：log_date 是 Date (`YYYY-MM-DD`)，lastEval 是 DateTime (`YYYY-MM-DD HH:mm:ss`)。比较时统一截取 `[:10]`，且必须 `>`（严格晚于），不能用 `>=`，否则同一天的旧日志也会误判为新日志。
 
 **步骤**：
 
@@ -139,7 +139,7 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 - [ ] C3 逐项目过滤（对每条 confirmed-needAI=1 的记录）
        a) 用 get_record_details(row_id) 取 lastEval 真实值
        b) lastEval 有值 → 查日志表(69ca1fc9d128aadb0c749edf)
-          filter: belongsto=rowId AND log_date[:10] >= lastEval[:10]
+          filter: belongsto=rowId AND log_date[:10] > lastEval[:10]
           有结果 → 进入评审
        c) lastEval 为空 → 查日志表 belongsto=rowId，total>0 → 进入评审
        d) 否则跳过
@@ -287,7 +287,7 @@ python3 skills/crm-project-review/scripts/review_project.py \
 | `update_record` 静默无效果 | `controlId` 错误 | 重新执行 `get_worksheet_structure` |
 | Token 过期 | 外部刷新进程未运行 | 联系管理员刷新 token |
 | `get_record_list` 带 filter 返回全表（未过滤） | 用了 REST API 扁平格式 `{controlId, operator, value}`，MCP 要求 `{type:"group", children:[{type:"condition",...}]}` 嵌套结构。HAP 对未知 filter 格式**静默忽略**不报错 | 始终从 `tools/list` → `inputSchema` 确认 filter 结构，root 必须是 `group` |
-| 日志时间比较假阴性（有当天新日志被判为「无新日志」） | HAP 中 `跟进日志` 字段是 Date 类型（`YYYY-MM-DD`），`最后评估时间` 是 DateTime 类型（`YYYY-MM-DD HH:mm:ss`）。字符串直接比较：`"2026-06-05" < "2026-06-05 14:15:00"`（前缀规则）→ 同一天的日志被判定为更早 | 比较前统一截取前 10 位 `[:10]`，或用 `datetime.strptime(s[:10], "%Y-%m-%d")` 解析后再比较 |
+| 日志时间比较假阴性/假阳性 | HAP 中 `跟进日志` 字段是 Date 类型（`YYYY-MM-DD`），`最后评估时间` 是 DateTime 类型（`YYYY-MM-DD HH:mm:ss`）。字符串直接比较：`"2026-06-05" < "2026-06-05 14:15:00"`（前缀规则）。用 `>=` 则同一天旧日志误判为新日志 | 统一截取 `[:10]` 后用 `>`（严格晚于），不用 `>=` |
 | 大量 `exec` 调用拖慢评审（60+ 工具调用） | Agent 用 `exec` 跑 shell/Python 直连 HAP，而非通过 MCP 工具 | **严格使用 MCP 工具**（`get_record_list`、`knowledge_search`、`update_record` 等），禁止 `exec`/`curl`/`requests`/`urllib` 拼 HTTP 直连 |
 | `get_record_details` 报 430002（rowId 无效） | 传入了 `get_record_list` 返回的 `_id`（24位hex别名），真 rowId 在 search 模式的 `rowId` 字段中 | 始终从 search 结果取 `rowId` 字段（UUID），不用 `_id` |
 | `knowledge_search` 报 600302「集成应用不可用」 | Personal MCP (Bearer token) 下 KB 集成不可用，需 Fallback 到 App MCP (Appkey+Sign) | 已知行为，自动切换到 App MCP 重试，无需告警或中断 |
@@ -300,8 +300,11 @@ python3 skills/crm-project-review/scripts/review_project.py \
 
 ---
 
-**技能版本**：v3.5.1
+**技能版本**：v3.5.2
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.5.2 变更**：
+- §4.2 C3 日期比较从 `>=` 修正为 `>`（严格晚于），修复同一天旧日志误判为新日志的假阳性
 
 **v3.5.1 变更**：
 - §3 铁律新增：`get_record_list` 的 `_id` 是别名，真 rowId 在 `rowId` 字段
