@@ -151,6 +151,9 @@ description: 基于明道云项目管理知识库，对 ClawCRM 项目记录进�
 - [ ] C5 逐项目评审
        对每个候选，执行 §4 单项目流程（S1-S10），或运行：
        python3 /root/.openclaw/skills/crm_project_review/scripts/review_project.py --project "<名称>" --topk 10
+       ⚠️ 评审完成后，**立即单独更新 lastEval**（仅 lastEval，不含报告），
+       再用 --writeback-file 写回报告。两步分离，确保 lastEval 必落盘，
+       防止报告写回失败导致同一项目在同一天被重复评估。
 
 - [ ] C6 完成通知
        企微发给 WenJing，列出每项目的评审状态。
@@ -291,6 +294,7 @@ python3 skills/crm-project-review/scripts/review_project.py \
 | 大量 `exec` 调用拖慢评审（60+ 工具调用） | Agent 用 `exec` 跑 shell/Python 直连 HAP，而非通过 MCP 工具 | **严格使用 MCP 工具**（`get_record_list`、`knowledge_search`、`update_record` 等），禁止 `exec`/`curl`/`requests`/`urllib` 拼 HTTP 直连 |
 | `get_record_details` 报 430002（rowId 无效） | 传入了 `get_record_list` 返回的 `_id`（24位hex别名），真 rowId 在 search 模式的 `rowId` 字段中 | 始终从 search 结果取 `rowId` 字段（UUID），不用 `_id` |
 | `knowledge_search` 报 600302「集成应用不可用」 | Personal MCP (Bearer token) 下 KB 集成不可用，需 Fallback 到 App MCP (Appkey+Sign) | 已知行为，自动切换到 App MCP 重试，无需告警或中断 |
+| 同一项目在同一天被重复评估多次 | 报告写回失败导致 lastEval 未更新，下一轮 cron 又拉入候选 | C5 评审完成后**先单独 update_record 设 lastEval**，再写报告。两步分离，lastEval 必落盘 |
 
 ## 10. Related
 
@@ -300,8 +304,11 @@ python3 skills/crm-project-review/scripts/review_project.py \
 
 ---
 
-**技能版本**：v3.5.2
+**技能版本**：v3.5.3
 **适用范围**：明道云 HAP（SaaS）
+
+**v3.5.3 变更**：
+- §4.2 C5 增加 lastEval 必须先独立更新的铁律，防止报告写回失败导致重复评估
 
 **v3.5.2 变更**：
 - §4.2 C3 日期比较从 `>=` 修正为 `>`（严格晚于），修复同一天旧日志误判为新日志的假阳性
